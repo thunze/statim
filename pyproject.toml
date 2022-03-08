@@ -2,7 +2,7 @@
 name = "statim"
 version = "0.1.0"
 description = ""
-license = ""
+license = "LGPL-2.1-only"
 authors = ["Tom Hunze <github@thunze.de>"]
 readme = "README.md"
 
