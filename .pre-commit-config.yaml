@@ -29,3 +29,4 @@ repos:
     rev: v0.931
     hooks:
       - id: mypy
+        additional_dependencies: [pydantic]  # for the pydantic mypy plugin to work
