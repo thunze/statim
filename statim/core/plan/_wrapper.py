@@ -7,7 +7,7 @@ from pydantic import schema_json_of
 from . import win10
 from ._base import BaseModel, Plan
 
-__all__ = ['parse_plan', 'json_schema']
+__all__ = ['from_dict', 'from_str', 'json_schema']
 
 
 JSON_INDENT = 4
@@ -24,21 +24,27 @@ class _PlanWrapper(BaseModel):
     __root__: win10.Plan
 
 
-def parse_plan(dict_: dict[str, Any]) -> Plan:
+def from_dict(dict_: dict[str, Any]) -> Plan:
     """Parse an arbitrary ``Plan`` in the form of a ``dict``.
 
     Example::
 
-      parse_plan({
+      plan.from_dict({
           'os': OS.win10,
           'uefi': True,
           'source': {
               'type': 'local',
               'path': '/path/to/windows_10.iso'
-          }
+          },
+          ...
       })
     """
     return _PlanWrapper.parse_obj(dict_).__root__
+
+
+def from_str(str_: str) -> Plan:
+    """Parse an arbitrary ``Plan`` in the form of a ``str`` containing JSON data."""
+    return _PlanWrapper.parse_raw(str_, content_type='json').__root__
 
 
 def json_schema() -> str:

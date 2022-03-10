@@ -12,7 +12,7 @@ from .win import Bitness, Language, Locale, Timezone
 class Version(str, Enum):
     """Windows 10 Versions."""
 
-    v_21h2 = '21H2'
+    v_21h2 = '21h2'
 
 
 class Edition(str, Enum):

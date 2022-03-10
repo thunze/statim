@@ -6,16 +6,16 @@ set to create a bootable drive for the purpose of installing an operating system
 also defines OS-specific methods required to create a bootable drive supporting
 specific functionality like unattended installation.
 
-Plans are parsed using the ``parse_plan`` or the ``parse_plan_raw`` function. For
-example::
+Plans are parsed using the ``from_dict`` or the ``from_str`` function. For example::
 
-  parse_plan({
+  plan.from_dict({
       'os': OS.win10,
       'uefi': True,
       'source': {
           'type': 'local',
           'path': '/path/to/windows_10.iso'
-      }
+      },
+      ...
   })
 
 The according JSON schema can be exported using the ``json_schema`` function.
