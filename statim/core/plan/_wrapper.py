@@ -23,6 +23,18 @@ class _PlanWrapper(BaseModel):
     # )
     __root__: win10.Plan
 
+    class Config:
+        """Pydantic model configuration."""
+
+        schema_extra = {
+            'additionalProperties': False,
+            'title': 'Plan',
+            'description': (
+                'Configuration to customize the creation of a desired bootable drive.'
+            ),
+            '$schema': 'http://json-schema.org/draft-07/schema',
+        }
+
 
 def from_dict(dict_: dict[str, Any]) -> Plan:
     """Parse an arbitrary ``Plan`` in the form of a ``dict``.
