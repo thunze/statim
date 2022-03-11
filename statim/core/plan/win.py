@@ -16,14 +16,20 @@ class Language(str, Enum):
 class Locale(str, Enum):
     """Locales to choose from when installing Windows (see ``win*.Unattend``).
 
-    See https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/70feba9f-294e-491e-b6eb-56532684c37f.  # noqa
+    https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/70feba9f-294e-491e-b6eb-56532684c37f
     """
 
     en_US = 'en-US'
 
 
-# locales are valid values for timezones, too
-Timezone = Locale
+# locales are valid time zone values in Windows answer files
+class Timezone(str, Enum):
+    """Time zones to choose from when installing Windows (see ``win*.Unattend``).
+
+    See ``tzutil /l`` on Windows for a list of time zones.
+    """
+
+    en_US = 'en-US'
 
 
 USERNAME_REGEX = (

@@ -1,9 +1,9 @@
 """Windows 10 ``Plan`` class and related classes."""
 
 from enum import Enum
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from pydantic import Field
+from pydantic import Field, root_validator
 
 from ._base import (
     OS,
@@ -81,10 +81,10 @@ class Unattend(BaseModel):
 
     timezone: Timezone = Field(
         None,
-        title='Timezone',
+        title='Time Zone',
         description=(
-            'Timezone to set during installation of Windows 10. Defaults to the '
-            'default timezone for the specified locale.'
+            'Time zone to set during installation of Windows 10. Defaults to the '
+            'default time zone for the specified locale.'
         ),
     )
 
@@ -104,6 +104,33 @@ class Unattend(BaseModel):
             strip_whitespace=True,
         ),
     ]
+
+    @root_validator
+    def timezone_eq_locale_if_none(cls, values: dict[str, Any]) -> dict[str, Any]:
+        """
+        If ``timezone`` is not set, use ``locale`` as the value of ``timezone``.
+
+        That's possible because in answer files for Windows 10 ``Locale`` values are
+        also valid ``Timezone`` values. Then during installation the default time zone
+        the selected locale is chosen. Find a list of default time zones here:
+
+        https://docs.microsoft.com/en-us/windows-hardware/manufacture/desktop/default-time-zones
+
+        :param values: Values of the Plan instance before inferring timezone.
+        :returns: Values of the Plan instance after inferring timezone.
+        """
+        timezone_ = values.get('timezone')
+        locale_ = values.get('locale')
+
+        # locale_ is only None if the validation of this model failed.
+        # But the according exception is only raised *after* this validator is
+        # executed, so we can safely skip this inferral if locale_ is None.
+        if locale_ is not None and timezone_ is None:
+            # Note that we need to convert the regarding value from one enum
+            # (Locale) to another enum (Timezone) here. We know that Locale is a
+            # subset of Timezone because that's how Timezone is created.
+            values['timezone'] = Timezone[locale_.name]
+        return values
 
 
 class Plan(PlanWithUnattendSupport):
