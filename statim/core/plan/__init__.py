@@ -1,4 +1,4 @@
-"""Configuration classes describing how statim should create a desired bootable drive.
+"""Configuration classes to customize the creation of a desired bootable drive.
 
 This package provides ``Plan`` subclasses for all available operating systems and
 related classes and functions. A ``Plan`` subclass defines which parameters can be

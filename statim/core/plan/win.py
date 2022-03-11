@@ -2,14 +2,7 @@
 
 from enum import Enum
 
-__all__ = ['Bitness', 'Language', 'Locale', 'Timezone', 'USERNAME_REGEX']
-
-
-class Bitness(Enum):
-    """Processor bitnesses supported by Windows."""
-
-    thirtytwo = 32
-    sixtyfour = 64
+__all__ = ['Language', 'Locale', 'Timezone', 'USERNAME_REGEX']
 
 
 class Language(str, Enum):
@@ -17,7 +10,7 @@ class Language(str, Enum):
     Microsoft (see ``win*.AutoSource``).
     """
 
-    en_us = "en-US"
+    en_us = 'en-US'
 
 
 class Locale(str, Enum):
@@ -34,7 +27,7 @@ Timezone = Locale
 
 
 USERNAME_REGEX = (
-    r'^(?i)(?!(aux|con|nul|prn|com[1-9]|lpt|lpt[1-9]?'
-    r'|batch|dialup|proxy|defaultaccount|defaultuser0|public|trustedinstaller'
-    r'|wdagutilityaccount)$)(?!.*[/\\\[\]:;|=,+*?<>"%@].*$)(?!\..*\.?$).+ '
+    r'^(?i)(?!(aux|con|nul|prn|com[1-9]|lpt|lpt[1-9]?|batch|dialup|proxy|defaultaccount'
+    r'|defaultuser0|public|trustedinstaller|wdagutilityaccount)$)'
+    r'(?!.*[/\\\[\]:;|=,+*?<>"%@].*$)(?!\..*\.?$).+'
 )
