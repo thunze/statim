@@ -41,15 +41,15 @@ def from_dict(dict_: dict[str, Any]) -> Plan:
 
     Example::
 
-      plan.from_dict({
-          'os': OS.win10,
-          'uefi': True,
-          'source': {
-              'type': 'local',
-              'path': '/path/to/windows_10.iso'
-          },
-          ...
-      })
+        plan.from_dict({
+            'os': OS.win10,
+            'uefi': True,
+            'source': {
+                'type': 'local',
+                'path': '/path/to/windows_10.iso'
+            },
+            ...
+        })
     """
     return _PlanWrapper.parse_obj(dict_).__root__
 
