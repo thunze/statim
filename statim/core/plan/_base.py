@@ -12,14 +12,16 @@ from pydantic import Extra, Field
 
 __all__ = [
     'OS',
-    'BaseModel',
-    'LocalSource',
-    'RemoteSource',
-    'Plan',
-    'PlanWithUnattendSupport',
     'OS_FIELD_KWARGS',
+    'SCHEMA_EXTRA_DEFAULT',
     'SOURCE_FIELD_KWARGS',
     'UNATTEND_FIELD_KWARGS',
+    'BaseModel',
+    'LocalSource',
+    'Plan',
+    'PlanWithUnattendSupport',
+    'QuietEnum',
+    'RemoteSource',
 ]
 
 
@@ -27,6 +29,9 @@ class OS(str, Enum):
     """Enum of all currently supported operating systems."""
 
     win10 = 'win10'
+
+
+SCHEMA_EXTRA_DEFAULT = {'additionalProperties': False}
 
 
 class BaseModel(PydanticBaseModel):
@@ -38,12 +43,34 @@ class BaseModel(PydanticBaseModel):
         """Pydantic model configuration."""
 
         allow_mutation = False
-        schema_extra = {'additionalProperties': False}
+        schema_extra = SCHEMA_EXTRA_DEFAULT
         extra = Extra.forbid
 
 
+class QuietEnum(Enum):
+    """``Enum`` which doesn't expose its ``__class__`` and ``__docstring__`` if used
+    as a field type in a pydantic model and its schema is exported.
+
+    If the JSON schema of a pydantic field with an ``Enum`` type is created,
+    two definitions are made in the schema: One defining the field itself with all
+    its kwargs passed to the ``Field`` function and – included using *allOf* – the
+    schema of the ``Enum`` type. The *title* and *description* values of the ``Enum``
+    type schema however are always created using ``__class__`` and ``__docstring__``
+    which we want to avoid. We can safely remove these values from the schema because
+    the schema of the regarding pydantic field (which kind of acts as a wrapper in
+    this case) most likely already has *title* and *description* values defined,
+    so auto-completion tools can just use them instead.
+    """
+
+    @classmethod
+    def __modify_schema__(cls, field_schema: dict[str, Any]) -> None:
+        """Remove the *title* and *description* attributes from the schema."""
+        del field_schema['title']
+        del field_schema['description']
+
+
 class LocalSource(BaseModel):
-    """Source of an OS installation image accessible via a local path."""
+    """OS installation image source accessible via a local path."""
 
     type: Literal['local']
 
@@ -57,9 +84,20 @@ class LocalSource(BaseModel):
         ),
     )
 
+    class Config:
+        """Pydantic model configuration."""
+
+        title = 'Local Source'
+        schema_extra = SCHEMA_EXTRA_DEFAULT | {
+            'description': (
+                'Local source of an installation image for the desired operating '
+                'system.'
+            )
+        }
+
 
 class RemoteSource(BaseModel):
-    """Source of an OS installation image accessible via HTTP."""
+    """OS installation image source accessible via HTTP."""
 
     type: Literal['remote']
 
@@ -73,6 +111,17 @@ class RemoteSource(BaseModel):
             'configuration.'
         ),
     )
+
+    class Config:
+        """Pydantic model configuration."""
+
+        title = 'Remote Source'
+        schema_extra = SCHEMA_EXTRA_DEFAULT | {
+            'description': (
+                'HTTP source of an installation image for the desired operating '
+                'system.'
+            )
+        }
 
 
 class Plan(BaseModel, ABC):
@@ -141,7 +190,7 @@ OS_FIELD_KWARGS = _FieldMeta(
 
 SOURCE_FIELD_KWARGS = _FieldMeta(
     title='Source',
-    description='Source of the installation files for the desired operating system.',
+    description='Source of an installation image for the desired operating system.',
 )
 
 UNATTEND_FIELD_KWARGS = _FieldMeta(
