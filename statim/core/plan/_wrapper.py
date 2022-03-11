@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import schema_json_of
 
 from . import win10
-from ._base import BaseModel, Plan
+from ._base import SCHEMA_EXTRA_DEFAULT, BaseModel, Plan
 
 __all__ = ['from_dict', 'from_str', 'json_schema']
 
@@ -26,11 +26,10 @@ class _PlanWrapper(BaseModel):
     class Config:
         """Pydantic model configuration."""
 
-        schema_extra = {
-            'additionalProperties': False,
-            'title': 'Plan',
+        title = 'Plan'
+        schema_extra = SCHEMA_EXTRA_DEFAULT | {
             'description': (
-                'Configuration to customize the creation of a desired bootable drive.'
+                'Configuration to customize the creation of a bootable drive.'
             ),
             '$schema': 'http://json-schema.org/draft-07/schema',
         }
@@ -61,4 +60,4 @@ def from_str(str_: str) -> Plan:
 
 def json_schema() -> str:
     """Return the JSON schema of the discriminated union of all ``Plan`` subclasses."""
-    return schema_json_of(_PlanWrapper, indent=JSON_INDENT)
+    return schema_json_of(_PlanWrapper, title='statim Plan', indent=JSON_INDENT)
