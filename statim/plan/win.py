@@ -20,6 +20,7 @@ class Locale(str, QuietEnum):
     """
 
     en_us = 'en-US'
+    de_de = 'de-DE'
 
 
 class Timezone(str, QuietEnum):
@@ -32,7 +33,7 @@ class Timezone(str, QuietEnum):
 
 
 USERNAME_REGEX = (
-    r'^(?i)(?!(aux|con|nul|prn|com[1-9]|lpt|lpt[1-9]?|batch|dialup|proxy'
+    r'(?i)^(?!(aux|con|nul|prn|com[1-9]|lpt|lpt[1-9]?|batch|dialup|proxy'
     r'|defaultaccount|defaultuser0|public|trustedinstaller|wdagutilityaccount)$)'
     r'(?!.*[/\\\[\]:;|=,+*?<>"%@].*$)(?!\..*\.?$).+'
 )

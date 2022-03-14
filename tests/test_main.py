@@ -1,6 +1,6 @@
 from statim.__main__ import main
 
 
-def test_main() -> None:
+def test_main():
     """Just run the main function."""
     main()

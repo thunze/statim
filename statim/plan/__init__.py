@@ -8,18 +8,27 @@ specific functionality like unattended installation.
 
 Plans are parsed using the ``from_dict`` or the ``from_str`` function. For example::
 
-  plan.from_dict({
-      'os': OS.win10,
-      'uefi': True,
-      'source': {
-          'type': 'local',
-          'path': '/path/to/windows_10.iso'
-      },
-      ...
-  })
+    plan.from_dict({
+        'os': OS.win10,
+        'uefi': True,
+        'source': {
+            'type': 'local',
+            'path': '/path/to/windows_10.iso'
+        },
+        ...
+    })
 
 The according JSON schema can be exported using the ``json_schema`` function.
 """
 
-# from ._base import OS, Plan, PlanWithUnattendSupport
-# from ._wrapper import *
+from ._base import OS, Plan, PlanWithUnattendSupport
+from ._wrapper import from_dict, from_str, json_schema
+
+__all__ = [
+    'from_dict',
+    'from_str',
+    'json_schema',
+    'OS',
+    'Plan',
+    'PlanWithUnattendSupport',
+]

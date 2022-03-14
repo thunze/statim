@@ -218,9 +218,7 @@ class Plan(PlanWithUnattendSupport):
         """If an ``AutoSource`` was selected, fetch an according download URL from
         Microsoft and return a ``RemoteSource`` with this URL.
         """
-        if isinstance(self.source, AutoSource):
-            raise NotImplementedError
-        return self.source
+        raise NotImplementedError
 
     def prepare_unattended_installation(self) -> None:
         """Prepare the drive to install Windows 10 in an unattended fashion if desired.
