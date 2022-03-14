@@ -1,5 +1,6 @@
 """Windows 10 ``Plan`` class and related classes."""
 
+import logging
 from typing import Annotated, Any, Literal, Optional
 
 from pydantic import Field, root_validator
@@ -17,6 +18,11 @@ from ._base import (
     RemoteSource,
 )
 from .win import USERNAME_REGEX, Language, Locale, Timezone
+
+__all__ = ['Plan', 'AutoSource', 'Unattend', 'Version', 'Edition']
+
+
+log = logging.getLogger(__name__)
 
 
 class Version(str, QuietEnum):
@@ -128,6 +134,7 @@ class Unattend(BaseModel):
             )
         }
 
+    # noinspection PyMethodParameters
     @root_validator
     def timezone_eq_locale_if_none(cls, values: dict[str, Any]) -> dict[str, Any]:
         """
@@ -151,6 +158,7 @@ class Unattend(BaseModel):
         if locale_ is not None and timezone_ is None:
             # locales are valid time zone values in Windows answer files
             values['timezone'] = locale_
+            log.debug(f'Time zone not specified, using locale {locale_} instead')
         return values
 
 
