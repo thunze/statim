@@ -90,7 +90,8 @@ class Unattend(BaseModel):
         ),
     )
 
-    timezone: Timezone = Field(
+    # locales are valid time zone values in Windows answer files
+    timezone: Timezone | Locale = Field(
         None,
         title='Time Zone',
         description=(
@@ -146,12 +147,10 @@ class Unattend(BaseModel):
 
         # locale_ is only None if the validation of this model failed.
         # But the according exception is only raised *after* this validator is
-        # executed, so we can safely skip this inferral if locale_ is None.
+        # executed, so we can safely skip inferring timezone if locale_ is None.
         if locale_ is not None and timezone_ is None:
-            # Note that we need to convert the regarding value from one enum
-            # (Locale) to another enum (Timezone) here. We know that Locale is a
-            # subset of Timezone because that's how Timezone is created.
-            values['timezone'] = Timezone[locale_.name]
+            # locales are valid time zone values in Windows answer files
+            values['timezone'] = locale_
         return values
 
 

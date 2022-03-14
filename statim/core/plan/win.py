@@ -19,17 +19,16 @@ class Locale(str, QuietEnum):
     https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/70feba9f-294e-491e-b6eb-56532684c37f
     """
 
-    en_US = 'en-US'
+    en_us = 'en-US'
 
 
-# locales are valid time zone values in Windows answer files
 class Timezone(str, QuietEnum):
     """Time zones to choose from when installing Windows (see ``win*.Unattend``).
 
     See ``tzutil /l`` on Windows for a list of time zones.
     """
 
-    en_US = 'en-US'
+    w_europe_standard_time = "W. Europe Standard Time"
 
 
 USERNAME_REGEX = (
