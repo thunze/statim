@@ -4,7 +4,6 @@ import sys
 
 def main() -> None:
     """Main function."""
-
     # prepare logging
     logging.basicConfig(
         level=logging.DEBUG,
