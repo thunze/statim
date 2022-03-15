@@ -48,18 +48,18 @@ class BaseModel(PydanticBaseModel):
 
 
 class QuietEnum(Enum):
-    """``Enum`` which doesn't expose its ``__class__`` and ``__docstring__`` if used
-    as a field type in a pydantic model and its schema is exported.
+    """``Enum`` which doesn't expose its ``__name__`` and ``__doc__`` if used as a
+    field type in a pydantic model and its schema is exported.
 
     If the JSON schema of a pydantic field with an ``Enum`` type is created,
     two definitions are made in the schema: One defining the field itself with all
     its kwargs passed to the ``Field`` function and – included using *allOf* – the
     schema of the ``Enum`` type. The *title* and *description* values of the ``Enum``
-    type schema however are always created using ``__class__`` and ``__docstring__``
-    which we want to avoid. We can safely remove these values from the schema because
-    the schema of the regarding pydantic field (which kind of acts as a wrapper in
-    this case) most likely already has *title* and *description* values defined,
-    so auto-completion tools can just use them instead.
+    type schema however are always created using ``__name__`` and ``__doc__`` of the
+    ``Enum`` which we want to avoid. We can safely remove these values from the
+    schema because the schema of the regarding pydantic field (which kind of acts as
+    a wrapper in this case) most likely already has *title* and *description* values
+    defined, so auto-completion tools can just use them instead.
     """
 
     @classmethod
