@@ -21,14 +21,16 @@ Plans are parsed using the ``from_dict`` or the ``from_str`` function. For examp
 The according JSON schema can be exported using the ``json_schema`` function.
 """
 
-from ._base import OS, Plan, PlanWithUnattendSupport
+from ._base import OS, LocalSource, Plan, PlanWithUnattendSupport, RemoteSource
 from ._wrapper import from_dict, from_str, json_schema
 
 __all__ = [
     'from_dict',
     'from_str',
     'json_schema',
+    'LocalSource',
     'OS',
     'Plan',
     'PlanWithUnattendSupport',
+    'RemoteSource',
 ]

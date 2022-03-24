@@ -9,6 +9,8 @@ readme = 'README.md'
 [tool.poetry.dependencies]
 python = '^3.10'
 pydantic = '^1.9.0'
+pycdlib = "^1.12.0"
+requests = "^2.27.1"
 
 [tool.poetry.dev-dependencies]
 pytest = '^7.0.1'
@@ -19,6 +21,7 @@ flake8 = '^4.0.1'
 black = '^22.1.0'
 mypy = '^0.941'
 isort = '^5.10.1'
+types-requests = '^2.27.13'
 
 [tool.coverage.report]
 exclude_lines = [
@@ -61,6 +64,10 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = 'tests.*'
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = 'pycdlib'  # missing py.typed marker
+ignore_missing_imports = true
 
 [tool.pydantic-mypy]
 init_forbid_extra = true
