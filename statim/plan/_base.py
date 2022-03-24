@@ -53,7 +53,7 @@ class QuietEnum(Enum):
 
     If the JSON schema of a pydantic field with an ``Enum`` type is created,
     two definitions are made in the schema: One defining the field itself with all
-    its kwargs passed to the ``Field`` function and – included using *allOf* – the
+    its kwargs passed to the ``Field`` function and -- included using *allOf* -- the
     schema of the ``Enum`` type. The *title* and *description* values of the ``Enum``
     type schema however are always created using ``__name__`` and ``__doc__`` of the
     ``Enum`` which we want to avoid. We can safely remove these values from the
@@ -127,7 +127,7 @@ class RemoteSource(BaseModel):
 class Plan(BaseModel, ABC):
     """Abstract base class of all OS-specific plans."""
 
-    # dummy field for linters, gets correctly overridden by every subclass
+    # dummy field for linters, correctly overridden by every subclass
     os: OS
 
     uefi: bool = Field(
@@ -165,7 +165,7 @@ class PlanWithUnattendSupport(Plan):
     installation
     """
 
-    # dummy field for linters, gets correctly overridden by every subclass
+    # dummy field for linters, correctly overridden by every subclass
     unattend: Optional[Any]
 
     @abstractmethod
