@@ -54,6 +54,8 @@ def test_username_regex_success(username, username_regex):
         'COM9',
         'LpT',
         'LPT5',
+        'conin$',
+        'conOUT$',
         'batch',
         'dialup',
         'TrustedInstaller',

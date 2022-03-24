@@ -33,8 +33,8 @@ class Timezone(str, QuietEnum):
 
 
 USERNAME_REGEX = (
-    r'(?i)^(?!(aux|con|nul|prn|com[1-9]|lpt|lpt[1-9]?|batch|dialup|proxy'
+    r'(?i)^(?!(aux|con|nul|prn|com[1-9]|lpt[1-9]?|conin\$|conout\$|batch|dialup|proxy'
     r'|defaultaccount|defaultuser0|public|trustedinstaller|wdagutilityaccount)$)'
     r'(?!.*[/\\\[\]:;|=,+*?<>"%@].*$)(?!\..*\.?$).+'
 )
-"""Eliminates usernames forbidden on Windows."""
+"""Eliminates user and directory names forbidden on Windows."""
