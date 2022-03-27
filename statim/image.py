@@ -276,8 +276,7 @@ def tps_win10_uefi(filepath_iso: PurePosixPath, target_paths: tuple[Path, ...]) 
     # actual logic
     if filepath_iso.parts[0] == 'sources' and not filepath_iso.parts[1] == 'boot.wim':
         return target_paths[1]
-    else:
-        return target_paths[0]
+    return target_paths[0]
 
 
 # --- Extraction
@@ -573,14 +572,15 @@ def _extract(
                 # filelist: list of files in current dir
 
                 for filename in filelist:
-                    # strip version number and trailing dot from ISO 9660 file name
-                    # for filepath_local: TODO
-                    # if iso_path_type == 'iso_path':
-                    #     filename = filename.split(';')[0]
-
                     filepath_iso = dirpath_iso / filename
                     rootpath_local = target_path_strategy(filepath_iso, target_paths)
-                    filepath_local = rootpath_local / filepath_iso
+
+                    # strip version number and semicolon from ISO 9660 local file name
+                    if iso_path_type == 'iso_path':
+                        filename_local = filename.split(';')[0]
+                        filepath_local = rootpath_local / dirpath_iso / filename_local
+                    else:
+                        filepath_local = rootpath_local / filepath_iso
 
                     extract_queue.put(
                         ExtractJob(filepath_iso, filepath_local, iso_path_type)
