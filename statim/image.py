@@ -2,21 +2,35 @@
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from io import SEEK_CUR, SEEK_END, SEEK_SET, IOBase, UnsupportedOperation
+from multiprocessing import Value
 from pathlib import Path, PurePosixPath
 from queue import Empty, Full, Queue
 from shutil import disk_usage
 from threading import Event
-from typing import BinaryIO, Callable, NamedTuple
+from typing import (
+    TYPE_CHECKING,
+    BinaryIO,
+    Callable,
+    Generator,
+    Iterator,
+    NamedTuple,
+    Optional,
+)
 
 import requests
 from pycdlib import PyCdlib
+from pycdlib.pycdlibexception import PyCdlibInvalidInput
 from requests.adapters import HTTPAdapter, Retry
 
 from .plan import LocalSource, RemoteSource
 
-__all__ = ['extract', 'tps_default', 'tps_win10_uefi']
+if TYPE_CHECKING:
+    from multiprocessing.sharedctypes import Synchronized
+
+__all__ = ['extract', 'ExtractProgress', 'tps_default', 'tps_win10_uefi']
 
 
 log = logging.getLogger(__name__)
@@ -24,18 +38,20 @@ log = logging.getLogger(__name__)
 
 HTTP_TIMEOUT = 10.0  # seconds
 HTTP_RETRY_STRATEGY = Retry(
-    total=5, backoff_factor=0.5, status_forcelist=(500, 502, 503, 504)  # retries
+    total=5, backoff_factor=0.5, status_forcelist=(500, 502, 503, 504)
 )
 
 _MIB = 1024 * 1024
-BLOCK_SIZE_LOCAL = 4 * _MIB
-BLOCK_SIZE_REMOTE = 4 * _MIB
+CHUNK_SIZE_LOCAL = 4 * _MIB
+CHUNK_SIZE_REMOTE = 1 * _MIB
 TARGET_PATHS_EXTRA_FREE_SPACE = 1 * _MIB  # safety buffer for additional files
 
 MAX_WORKERS_LOCAL = 1
 MAX_WORKERS_REMOTE = 16
 EXTRACT_QUEUE_TIMEOUT = 1  # seconds
 EXC_QUEUE_TIMEOUT = 0.05  # seconds
+
+PROGRESS_UPDATE_GAP = 0.5  # min seconds between extraction progress updates
 
 
 class HttpIO(IOBase, BinaryIO):
@@ -295,8 +311,7 @@ def _extract_worker(
     open_result_queue: Queue[OpenResult],
     extract_queue: Queue[ExtractJob],
     exc_queue: Queue[BaseException],
-    # progress: Value,
-    # pause_event: Event,
+    progress: 'Synchronized[int]',  # multiprocessing.Value
     quit_event: Event,
 ) -> None:
     """Function executed by worker threads spawned to extract files from an ISO image.
@@ -310,17 +325,16 @@ def _extract_worker(
     files.
 
     :param exc_queue: Queue of exceptions which were raised by this function.
-    :param progress: Counter describing how many bytes were already extracted.
-    :param pause_event: Event indicating that the worker threads are to be paused.
+    :param progress: Value indicating how many bytes were already extracted.
     :param quit_event: Event indicating that the worker threads are to be stopped.
     """
     try:
         source_file: BinaryIO
         if isinstance(source, LocalSource):
-            blocksize = BLOCK_SIZE_LOCAL
+            chunk_size = CHUNK_SIZE_LOCAL
             source_file = source.path.open(mode='rb')
         else:
-            blocksize = BLOCK_SIZE_REMOTE
+            chunk_size = CHUNK_SIZE_REMOTE
             source_file = HttpIO(source.url)
 
         with source_file:
@@ -344,52 +358,121 @@ def _extract_worker(
                 filepath_iso, filepath_local, iso_path_type = job
 
                 # create parent directories if necessary
-                dirpath_local_ = filepath_local.parent
-                dirpath_local_.mkdir(parents=True, exist_ok=True)
+                dirpath_local = filepath_local.parent
+                dirpath_local.mkdir(parents=True, exist_ok=True)
 
                 # noinspection PyUnresolvedReferences
                 filepath_iso_abs = '/' / filepath_iso
-                log.debug(f'Extracting {filepath_iso_abs}')
+                log.debug(f'Extracting {filepath_iso_abs} -> {filepath_local}')
 
-                # TODO: progess, pause, abort
-                iso.get_file_from_iso(
-                    str(filepath_local),  # pycdlib doesn't like pathlib paths
-                    **{iso_path_type: str(filepath_iso_abs)},
-                    blocksize=blocksize,
-                )
-                extract_queue.task_done()
+                # pycdlib doesn't like pathlib paths
+                file_iso_kwargs = {iso_path_type: str(filepath_iso_abs)}
 
+                try:
+                    file_iso = iso.open_file_from_iso(**file_iso_kwargs)
+                except PyCdlibInvalidInput as e:
+                    # Sometimes an El Torito boot catalog is represented by a data
+                    # file in an ISO image (e.g. '/isolinux/boot.cat'). If we try to
+                    # open such a data file using open_file_from_iso, an exception
+                    # with the message 'File has no data' is raised because this edge
+                    # case is not handled. However it is handled by get_file_from_iso.
+                    if str(e) == 'File has no data':
+                        log.debug(f'Suspecting boot catalog at {filepath_iso_abs}')
+
+                        with filepath_local.open('wb') as file_local:
+                            start_pos = file_local.tell()
+                            iso.get_file_from_iso_fp(
+                                file_local,
+                                **{iso_path_type: str(filepath_iso_abs)},
+                                blocksize=chunk_size,
+                            )
+                            end_pos = file_local.tell()
+                            # sync with other threads
+                            with progress.get_lock():
+                                progress.value += end_pos - start_pos
+                            extract_queue.task_done()
+                    else:
+                        raise
+                else:
+                    # open_file_from_iso succeeded
+                    with file_iso, filepath_local.open('wb') as file_local:
+                        file_bytes_total = file_iso.length()
+                        file_bytes_left = file_bytes_total
+
+                        # read and write chunk by chunk
+                        while file_bytes_left > 0 and not quit_event.is_set():
+
+                            bytes_expected = min(chunk_size, file_bytes_left)
+                            chunk = file_iso.read(bytes_expected)
+                            bytes_read = len(chunk)
+                            bytes_written = file_local.write(chunk)
+
+                            if bytes_read != bytes_expected:
+                                raise OSError(
+                                    f'Did not read the expected amount of bytes '
+                                    f'(expected {bytes_expected} bytes, read '
+                                    f'{bytes_read} bytes)'
+                                )
+                            if bytes_written != bytes_read:
+                                raise OSError(
+                                    f'Did not write the expected amount of bytes (read '
+                                    f'{bytes_expected} bytes, wrote {bytes_read} bytes)'
+                                )
+
+                            file_bytes_left -= bytes_written
+
+                            # sync with other threads
+                            with progress.get_lock():
+                                progress.value += bytes_written
+
+                        if file_bytes_left == 0:
+                            extract_queue.task_done()
             iso.close()
 
     except BaseException as e:
         exc_queue.put(e)
 
 
-def extract(
+class ExtractProgress(NamedTuple):
+    """Information about the extraction progress.
+
+    bytes_total: How many bytes to extract in total (+ overhead).
+    bytes_done: How many bytes were already extracted.
+    seconds_delta: How many seconds passed since the last progress update.
+    bytes_delta: How many bytes were extracted since the last progress update.
+    """
+
+    bytes_total: int
+    bytes_done: int
+    seconds_delta: float
+    bytes_delta: int
+
+    @property
+    def done_ratio(self) -> float:
+        """Ratio of already extracted bytes to bytes to extract in total."""
+        return self.bytes_done / self.bytes_total
+
+    @property
+    def bytes_per_second(self) -> float:
+        """Average extraction speed since the last progress update in bytes per
+        second.
+        """
+        return self.bytes_delta / self.seconds_delta
+
+    @property
+    def seconds_left(self) -> float:
+        """Estimated time required for extracting the remaining data in seconds."""
+        return (self.bytes_total - self.bytes_done) / self.bytes_per_second
+
+
+def _extract(
     source: LocalSource | RemoteSource,
     target_paths: Path | tuple[Path, ...],
-    target_path_strategy: Callable[
-        [PurePosixPath, tuple[Path, ...]], Path
-    ] = tps_default,
-) -> None:
+    target_path_strategy: Callable[[PurePosixPath, tuple[Path, ...]], Path],
+) -> Generator[Optional[ExtractProgress], None, None]:
     """Extract the contents of an ISO image file to local directories.
 
-    Args:
-        source: Source of the image file described by a LocalSource or a
-            RemoteSource.
-
-        target_paths: Paths to local directories to extract the contents of the image
-            file to. Usually only one target path is required.
-            The length of this tuple must match the length of the tuple the second
-            parameter of the callable target_path_strategy accepts.
-            Instead of passing a tuple of length 1, a single Path can also be passed.
-
-        target_path_strategy: Callable which determines which file (first parameter,
-            file path relative to ISO root) to extract to which local directory
-            specified in target_paths (second parameter).
-            Returns one of the target paths defined in the second parameter.
-            Functions which can be used as a value for this parameter are exported by
-            the image module and are named tps_*.
+    See ``extract`` for complete documentation.
     """
     time_start = time.perf_counter()
     log.info('Preparing ISO image extraction ...')
@@ -406,16 +489,17 @@ def extract(
 
     # prepare threading
     if isinstance(source, LocalSource):
+        chunk_size = CHUNK_SIZE_LOCAL
         max_workers = MAX_WORKERS_LOCAL
     else:
+        chunk_size = CHUNK_SIZE_REMOTE
         max_workers = MAX_WORKERS_REMOTE
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         open_result_queue: Queue[OpenResult] = Queue(maxsize=1)
         extract_queue: Queue[ExtractJob] = Queue()
         exc_queue: Queue[BaseException] = Queue()
-        # progress = Value('q', 0)  # zero bytes processed yet
-        # pause_event = Event()
+        progress: 'Synchronized[int]' = Value('q', 0)  # zero bytes processed yet
         quit_event = Event()
 
         # open IO handles separately to avoid side effects in extraction workers
@@ -427,8 +511,7 @@ def extract(
                 open_result_queue,
                 extract_queue,
                 exc_queue,
-                # progress,
-                # pause_event,
+                progress,
                 quit_event,
             )
             futures.append(future)
@@ -439,8 +522,8 @@ def extract(
                 source_file, iso = open_result_queue.get(block=False)
                 break
             except Empty:
-                # open_result_queue stays empty forever if an exception occurred in
-                # all worker threads before enqueuing a result
+                # open_result_queue stays empty forever if an exception is raised in
+                # every worker thread before enqueuing a result
                 try:
                     exc = exc_queue.get(timeout=EXC_QUEUE_TIMEOUT)
                 except Empty:
@@ -482,10 +565,7 @@ def extract(
         log.info('Extracting files from ISO image ...')
 
         try:
-            # The try block needs to start here because from here on jobs are added to
-            # extract_queue and these jobs keep the worker threads busy which means
-            # they won't quit until the queue is empty if an exception is raised here.
-
+            # add jobs to queue
             for dirpath_iso, _, filelist in iso.walk(**{iso_path_type: '/'}):
 
                 dirpath_iso = PurePosixPath(dirpath_iso).relative_to('/')
@@ -493,6 +573,11 @@ def extract(
                 # filelist: list of files in current dir
 
                 for filename in filelist:
+                    # strip version number and trailing dot from ISO 9660 file name
+                    # for filepath_local: TODO
+                    # if iso_path_type == 'iso_path':
+                    #     filename = filename.split(';')[0]
+
                     filepath_iso = dirpath_iso / filename
                     rootpath_local = target_path_strategy(filepath_iso, target_paths)
                     filepath_local = rootpath_local / filepath_iso
@@ -501,34 +586,110 @@ def extract(
                         ExtractJob(filepath_iso, filepath_local, iso_path_type)
                     )
 
-            # waiting for all worker threads to finish
+            bytes_delta_start = progress.value  # measure bytes
+            seconds_delta_start = time.perf_counter()  # measure time
+
+            # wait for all worker threads to finish
             while not all(future.done() for future in futures):
                 try:
                     exc = exc_queue.get(timeout=EXC_QUEUE_TIMEOUT)
                 except Empty:
-                    continue
+                    pass
                 else:
                     raise RuntimeError('Exception raised in worker thread') from exc
 
-        except BaseException:
-            # Any unhandled exception (incl. KeyboardInterrupt) raised inside the try
-            # block above wouldn't take effect if the worker threads stayed busy with
-            # jobs from extract_queue because the workers wouldn't quit in a timely
-            # manner.
-            log.warning(
-                'An unhandled exception was raised. Waiting for all workers to quit ...'
-            )
+                # send a progress update at most every PROGRESS_UPDATE_GAP seconds
+                if time.perf_counter() - seconds_delta_start >= PROGRESS_UPDATE_GAP:
+                    seconds_delta_end = time.perf_counter()
+                    bytes_delta_end = progress.value
+
+                    seconds_delta = seconds_delta_end - seconds_delta_start
+                    bytes_delta = bytes_delta_end - bytes_delta_start
+
+                    # only send a progress update if something significantly changed
+                    if bytes_delta >= chunk_size:
+                        yield ExtractProgress(
+                            size, bytes_delta_end, seconds_delta, bytes_delta
+                        )
+                        seconds_delta_start = seconds_delta_end
+                        bytes_delta_start = bytes_delta_end
+                    else:
+                        yield None
+                else:
+                    # return control to caller anyway to allow for faster reactions,
+                    # e.g. aborting extraction using close()
+                    yield None
+
+            # last progress update: bytes_done would otherwise always stay a little
+            # less than size because of the included overhead in size
+            progress.value = size
+            seconds_delta = time.perf_counter() - seconds_delta_start
+            bytes_delta = size - bytes_delta_start
+            yield ExtractProgress(size, size, seconds_delta, bytes_delta)
+
+        finally:
+            # Any unhandled exception raised during extraction wouldn't take effect if
+            # the worker threads stayed busy with jobs: They wouldn't quit until
+            # extract_queue is empty.
+            log.info('Waiting for all workers to quit ...')
             quit_event.set()
-            wait(futures)
-            raise
+            # make sure we don't miss any exception or cancellation of a future
+            for future in as_completed(futures):
+                future.result()
 
-        # make sure we don't miss any exception or cancellation of a future
-        for future in as_completed(futures):
-            future.result()
-
+        extract_queue.join()
         extraction_time = time.perf_counter() - time_extraction_start
-        log.debug(f'Finished extraction after {extraction_time:.4f} seconds')
-        log.debug(
+
+        log.info(f'Finished ISO image extraction after {extraction_time:.4f} seconds')
+        log.info(
             f'Average extraction speed: {(size / extraction_time):.4f} bytes per second'
         )
-        log.info('Finished ISO image extraction')
+
+
+@contextmanager
+def extract(
+    source: LocalSource | RemoteSource,
+    target_paths: Path | tuple[Path, ...],
+    target_path_strategy: Callable[
+        [PurePosixPath, tuple[Path, ...]], Path
+    ] = tps_default,
+) -> Iterator[Generator[Optional[ExtractProgress], None, None]]:
+    """Extract the contents of an ISO image file to local directories.
+
+    This is a context manager returning a generator on ``__enter__``. This generator
+    regularly yields ``ExtractProgress`` objects indicating the current extraction
+    progress. Also, its ``close()`` method as well as ``break`` can be used to abort
+    the extraction (see example).
+
+    Args:
+        source: Source of the image file described by a LocalSource or a RemoteSource.
+
+        target_paths: Paths to local directories to extract the contents of the image
+            file to. Usually only one target path is required.
+            The length of this tuple must match the length of the tuple the second
+            parameter of the callable target_path_strategy accepts.
+            Instead of passing a tuple of length 1, a single Path can be passed.
+
+        target_path_strategy: Callable which determines which file (first parameter,
+            file path relative to ISO root) is extracted to which local directory
+            specified in target_paths (second parameter).
+            Returns one of the target paths defined in the second parameter.
+            Functions which can be used as a value for this parameter are exported by
+            the image module and are named tps_*.
+
+    Example::
+
+        with extract('/path/to/windows_10.iso', '/path/to/destination') as extraction:
+            for progress in extraction:
+                if progress is not None:
+                    print(f'{(progress.done_ratio * 100):.2f} percent done')
+                if wanna_abort:
+                    break
+    """
+    gen = _extract(source, target_paths, target_path_strategy)
+    try:
+        yield gen
+    finally:
+        # _extract needs to stop the threads it spawns if an exception is raised
+        # during extraction
+        gen.close()

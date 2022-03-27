@@ -19,7 +19,7 @@ coveralls = '^3.3.1'
 pre-commit = '^2.17.0'
 flake8 = '^4.0.1'
 black = '^22.1.0'
-mypy = '^0.941'
+mypy = '^0.942'
 isort = '^5.10.1'
 types-requests = '^2.27.13'
 
@@ -66,7 +66,7 @@ module = 'tests.*'
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = 'pycdlib'  # missing py.typed marker
+module = ['pycdlib', 'pycdlib.pycdlibexception']  # missing py.typed marker
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
