@@ -2,7 +2,7 @@
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from io import SEEK_CUR, SEEK_END, SEEK_SET, IOBase, UnsupportedOperation
 from multiprocessing import Value
@@ -50,6 +50,7 @@ MAX_WORKERS_LOCAL = 1
 MAX_WORKERS_REMOTE = 16
 EXTRACT_QUEUE_TIMEOUT = 1  # seconds
 EXC_QUEUE_TIMEOUT = 0.05  # seconds
+PAUSE_TIMEOUT = 0.05  # seconds
 
 PROGRESS_UPDATE_GAP = 0.5  # min seconds between extraction progress updates
 
@@ -312,6 +313,7 @@ def _extract_worker(
     exc_queue: Queue[BaseException],
     progress: 'Synchronized[int]',  # multiprocessing.Value
     quit_event: Event,
+    resume_event: Event,
 ) -> None:
     """Function executed by worker threads spawned to extract files from an ISO image.
 
@@ -324,9 +326,20 @@ def _extract_worker(
     files.
 
     :param exc_queue: Queue of exceptions which were raised by this function.
-    :param progress: Value indicating how many bytes were already extracted.
-    :param quit_event: Event indicating that the worker threads are to be stopped.
+    :param progress: Value indicating how many bytes were already extracted in total.
+    :param quit_event: Event indicating that the worker is to be stopped.
+    :param resume_event: Event indicating that the worker is not to be paused.
     """
+
+    def pause_or_quit() -> bool:
+        """If ``quit_event`` isn't set, pause as long as ``resume_event`` isn't set.
+
+        Returns whether ``quit_event`` is set.
+        """
+        if not quit_event.is_set():
+            resume_event.wait()
+        return quit_event.is_set()
+
     try:
         source_file: BinaryIO
         if isinstance(source, LocalSource):
@@ -347,7 +360,7 @@ def _extract_worker(
                 # main thread only needs (source_file, iso) once
                 pass
 
-            while not quit_event.is_set():
+            while not pause_or_quit():
                 try:
                     # wait a bit in case there are no jobs in the queue yet
                     job = extract_queue.get(timeout=EXTRACT_QUEUE_TIMEOUT)
@@ -399,8 +412,7 @@ def _extract_worker(
                         file_bytes_left = file_bytes_total
 
                         # read and write chunk by chunk
-                        while file_bytes_left > 0 and not quit_event.is_set():
-
+                        while not pause_or_quit() and file_bytes_left > 0:
                             bytes_expected = min(chunk_size, file_bytes_left)
                             chunk = file_iso.read(bytes_expected)
                             bytes_read = len(chunk)
@@ -468,7 +480,7 @@ def _extract(
     source: LocalSource | RemoteSource,
     target_paths: Path | tuple[Path, ...],
     target_path_strategy: Callable[[PurePosixPath, tuple[Path, ...]], Path],
-) -> Generator[Optional[ExtractProgress], None, None]:
+) -> Generator[Optional[ExtractProgress], Optional[bool], None]:
     """Extract the contents of an ISO image file to local directories.
 
     See ``extract`` for complete documentation.
@@ -500,6 +512,8 @@ def _extract(
         exc_queue: Queue[BaseException] = Queue()
         progress: 'Synchronized[int]' = Value('q', 0)  # zero bytes processed yet
         quit_event = Event()
+        resume_event = Event()
+        resume_event.set()
 
         # open IO handles separately to avoid side effects in extraction workers
         futures = []
@@ -512,6 +526,7 @@ def _extract(
                 exc_queue,
                 progress,
                 quit_event,
+                resume_event,
             )
             futures.append(future)
 
@@ -598,6 +613,8 @@ def _extract(
                 else:
                     raise RuntimeError('Exception raised in worker thread') from exc
 
+                extract_progress = None
+
                 # send a progress update at most every PROGRESS_UPDATE_GAP seconds
                 if time.perf_counter() - seconds_delta_start >= PROGRESS_UPDATE_GAP:
                     seconds_delta_end = time.perf_counter()
@@ -606,19 +623,23 @@ def _extract(
                     seconds_delta = seconds_delta_end - seconds_delta_start
                     bytes_delta = bytes_delta_end - bytes_delta_start
 
-                    # only send a progress update if something significantly changed
+                    # only send an actual ExtractProgress (and not None) if something
+                    # significantly changed
                     if bytes_delta >= chunk_size:
-                        yield ExtractProgress(
+                        extract_progress = ExtractProgress(
                             size, bytes_delta_end, seconds_delta, bytes_delta
                         )
                         seconds_delta_start = seconds_delta_end
                         bytes_delta_start = bytes_delta_end
-                    else:
-                        yield None
-                else:
-                    # return control to caller anyway to allow for faster reactions,
-                    # e.g. aborting extraction using close()
-                    yield None
+
+                should_pause = yield extract_progress
+                if should_pause:
+                    resume_event.clear()
+                    pause_start = time.perf_counter()
+                    while (yield None):
+                        time.sleep(PAUSE_TIMEOUT)
+                    seconds_delta_start += time.perf_counter() - pause_start
+                    resume_event.set()
 
             # last progress update: bytes_done would otherwise always stay a little
             # less than size because of the included overhead in size
@@ -626,6 +647,7 @@ def _extract(
             seconds_delta = time.perf_counter() - seconds_delta_start
             bytes_delta = size - bytes_delta_start
             yield ExtractProgress(size, size, seconds_delta, bytes_delta)
+            wait(futures)
 
         finally:
             # Any unhandled exception raised during extraction wouldn't take effect if
@@ -633,6 +655,7 @@ def _extract(
             # extract_queue is empty.
             log.info('Waiting for all workers to quit ...')
             quit_event.set()
+            resume_event.set()  # order is important here!
             # make sure we don't miss any exception or cancellation of a future
             for future in as_completed(futures):
                 future.result()
@@ -653,13 +676,15 @@ def extract(
     target_path_strategy: Callable[
         [PurePosixPath, tuple[Path, ...]], Path
     ] = tps_default,
-) -> Iterator[Generator[Optional[ExtractProgress], None, None]]:
+) -> Iterator[Generator[Optional[ExtractProgress], Optional[bool], None]]:
     """Extract the contents of an ISO image file to local directories.
 
     This is a context manager returning a generator on ``__enter__``. This generator
     regularly yields ``ExtractProgress`` objects indicating the current extraction
-    progress. Also, its ``close()`` method as well as ``break`` can be used to abort
-    the extraction (see example).
+    progress. Calling its ``close()`` method as well leaving the context causes the
+    extraction to be aborted (see example). To pause the extraction, repeatedly pass
+    ``True`` instead of ``None`` to the generator using its ``send()`` method until
+    resumption is desired.
 
     Args:
         source: Source of the image file described by a LocalSource or a RemoteSource.
@@ -679,12 +704,12 @@ def extract(
 
     Example::
 
-        with extract('/path/to/windows_10.iso', '/path/to/destination') as extraction:
+        with extract(source, Path('/path/to/destination')) as extraction:
             for progress in extraction:
                 if progress is not None:
                     print(f'{(progress.done_ratio * 100):.2f} percent done')
                 if wanna_abort:
-                    break
+                    break  # leaving the context
     """
     gen = _extract(source, target_paths, target_path_strategy)
     try:
