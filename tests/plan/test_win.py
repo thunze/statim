@@ -21,7 +21,7 @@ def username_regex():
         'Chuck N()rr1z',
         'Chuck Nörriz',
         'CONny',
-        'accOmodation',
+        'accOmmodation',
         'COM',
         'COM10',
         'LPT0',

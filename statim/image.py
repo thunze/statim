@@ -203,7 +203,7 @@ class HttpIO(IOBase, BinaryIO):
 
         Returns an ``int`` indicating the new absolute position.
         """
-        self._checkClosed()
+        self._check_closed()
         if whence == SEEK_SET:
             if offset < 0:
                 raise ValueError(f'Negative seek position {offset}')
