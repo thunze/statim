@@ -22,6 +22,7 @@ black = '^22.1.0'
 mypy = '^0.942'
 isort = '^5.10.1'
 types-requests = '^2.27.13'
+requests-mock = {extras = ['pytest'], version = '^1.9.3'}
 
 [tool.coverage.report]
 exclude_lines = [
