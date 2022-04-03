@@ -67,8 +67,8 @@ module = 'tests.*'
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = ['pycdlib', 'pycdlib.pycdlibexception']  # missing py.typed marker
-ignore_missing_imports = true
+module = ['pycdlib', 'pycdlib.facade', 'pycdlib.pycdlibexception']
+ignore_missing_imports = true  # missing py.typed marker
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

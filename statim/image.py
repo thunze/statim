@@ -18,10 +18,12 @@ from typing import (
     Iterator,
     NamedTuple,
     Optional,
+    Union,
 )
 
 import requests
 from pycdlib import PyCdlib
+from pycdlib.facade import PyCdlibISO9660, PyCdlibJoliet, PyCdlibRockRidge, PyCdlibUDF
 from pycdlib.pycdlibexception import PyCdlibInvalidInput
 from requests.adapters import HTTPAdapter, Retry
 
@@ -282,6 +284,8 @@ def tps_win10_uefi(filepath_iso: PurePosixPath, target_paths: tuple[Path, ...]) 
 
 # --- Extraction
 
+PyCdlibFacade = Union[PyCdlibISO9660, PyCdlibJoliet, PyCdlibRockRidge, PyCdlibUDF]
+
 
 class OpenResult(NamedTuple):
     """File-like object and PyCdlib object passed back to the main thread after
@@ -303,7 +307,23 @@ class ExtractJob(NamedTuple):
 
     filepath_iso: PurePosixPath
     filepath_local: Path
-    iso_path_type: str
+
+
+def _get_facade_for_iso(iso: PyCdlib) -> PyCdlibFacade:
+    """Return the pycdlib facade of ``iso`` which matches the most preferable ISO
+    extension supported by ``iso``.
+    """
+    if iso.has_udf():
+        # prioritize UDF if it's available because it's required for modern
+        # Windows ISOs (>= Vista)
+        return iso.get_udf_facade()
+
+    if iso.has_joliet():
+        return iso.get_joliet_facade()
+    if iso.has_rock_ridge():
+        return iso.get_rock_ridge_facade()
+
+    return iso.get_iso9660_facade()
 
 
 def _extract_worker(
@@ -360,6 +380,8 @@ def _extract_worker(
                 # main thread only needs (source_file, iso) once
                 pass
 
+            iso_facade = _get_facade_for_iso(iso)
+
             while not pause_or_quit():
                 try:
                     # wait a bit in case there are no jobs in the queue yet
@@ -367,7 +389,7 @@ def _extract_worker(
                 except Empty:
                     break
 
-                filepath_iso, filepath_local, iso_path_type = job
+                filepath_iso, filepath_local = job
 
                 # create parent directories if necessary
                 dirpath_local = filepath_local.parent
@@ -377,11 +399,9 @@ def _extract_worker(
                 filepath_iso_abs = '/' / filepath_iso
                 log.debug(f'Extracting {filepath_iso_abs} -> {filepath_local}')
 
-                # pycdlib doesn't like pathlib paths
-                file_iso_kwargs = {iso_path_type: str(filepath_iso_abs)}
-
                 try:
-                    file_iso = iso.open_file_from_iso(**file_iso_kwargs)
+                    # pycdlib doesn't like pathlib paths
+                    file_iso = iso_facade.open_file_from_iso(str(filepath_iso_abs))
                 except PyCdlibInvalidInput as e:
                     # Sometimes an El Torito boot catalog is represented by a data
                     # file in an ISO image (e.g. '/isolinux/boot.cat'). If we try to
@@ -393,10 +413,9 @@ def _extract_worker(
 
                         with filepath_local.open('wb') as file_local:
                             start_pos = file_local.tell()
-                            iso.get_file_from_iso_fp(
+                            iso_facade.get_file_from_iso_fp(
                                 file_local,
-                                **{iso_path_type: str(filepath_iso_abs)},
-                                blocksize=chunk_size,
+                                str(filepath_iso_abs),
                             )
                             end_pos = file_local.tell()
                             # sync with other threads
@@ -559,20 +578,12 @@ def _extract(
         if space_available + TARGET_PATHS_EXTRA_FREE_SPACE < size:
             raise ValueError('Not enough disk space available at target directories')
 
-        # detect supported ISO extensions
-        if iso.has_udf():
-            # prioritize UDF if it's available because it's required for modern
-            # Windows ISOs (>= Vista)
-            iso_path_type = 'udf_path'
-        elif iso.has_joliet():
-            iso_path_type = 'joliet_path'
-        elif iso.has_rock_ridge():
-            iso_path_type = 'rr_path'
-        else:
-            iso_path_type = 'iso_path'
-            log.warning('Fallback to pure ISO 9660 format')
+        iso_facade = _get_facade_for_iso(iso)
+        iso_format_str = iso_facade.__class__.__name__.strip("PyCdlib")
+        log.debug(f'Selected ISO format {iso_format_str!r}')
 
-        log.debug(f'Selected ISO format with path type {iso_path_type!r}')
+        if isinstance(iso_facade, PyCdlibISO9660):
+            log.warning('Fallback to pure ISO 9660 format')
 
         # actual extraction
         time_extraction_start = time.perf_counter()
@@ -580,7 +591,7 @@ def _extract(
 
         try:
             # add jobs to queue
-            for dirpath_iso, _, filelist in iso.walk(**{iso_path_type: '/'}):
+            for dirpath_iso, _, filelist in iso_facade.walk('/'):
 
                 dirpath_iso = PurePosixPath(dirpath_iso).relative_to('/')
                 # dirpath_iso: path to current dir (relative to iso root)
@@ -591,15 +602,13 @@ def _extract(
                     rootpath_local = target_path_strategy(filepath_iso, target_paths)
 
                     # strip version number and semicolon from ISO 9660 local file name
-                    if iso_path_type == 'iso_path':
+                    if isinstance(iso_facade, PyCdlibISO9660):
                         filename_local = filename.split(';')[0]
                         filepath_local = rootpath_local / dirpath_iso / filename_local
                     else:
                         filepath_local = rootpath_local / filepath_iso
 
-                    extract_queue.put(
-                        ExtractJob(filepath_iso, filepath_local, iso_path_type)
-                    )
+                    extract_queue.put(ExtractJob(filepath_iso, filepath_local))
 
             bytes_delta_start = progress.value  # measure bytes
             seconds_delta_start = time.perf_counter()  # measure time
