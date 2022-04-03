@@ -105,7 +105,7 @@ class HttpIO(IOBase, BinaryIO):
 
     def _check_closed(self) -> None:
         """Raise a ``ValueError`` if the file is closed."""
-        if self.closed:
+        if self.closed:  # skipcq: PYL-W0125
             raise ValueError('I/O operation on closed file')
 
     def __enter__(self) -> 'HttpIO':

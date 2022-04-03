@@ -71,23 +71,23 @@ class TestHttpIO:
                 context.status_code = 200
                 context.headers['content-length'] = str(content_length)
                 return content
-            else:
-                range_start, range_end = range_.split('=')[1].split('-')
-                # HTTP range is inclusive
-                range_start, range_end = int(range_start), int(range_end) + 1
 
-                if range_start < 0 or range_end > content_length:
-                    context.status_code = 416  # Range Not Satisfiable
-                    context.headers['content-range'] = f'bytes */{content_length}'
-                    return b''
+            range_start, range_end = range_.split('=')[1].split('-')
+            # HTTP range is inclusive
+            range_start, range_end = int(range_start), int(range_end) + 1
 
-                partial_content = content[range_start:range_end]
-                context.status_code = 206
-                context.headers['content-length'] = str(range_end - range_start)
-                context.headers[
-                    'content-range'
-                ] = f'bytes {range_start}-{range_end - 1}/{content_length}'
-                return partial_content
+            if range_start < 0 or range_end > content_length:
+                context.status_code = 416  # Range Not Satisfiable
+                context.headers['content-range'] = f'bytes */{content_length}'
+                return b''
+
+            partial_content = content[range_start:range_end]
+            context.status_code = 206
+            context.headers['content-length'] = str(range_end - range_start)
+            context.headers[
+                'content-range'
+            ] = f'bytes {range_start}-{range_end - 1}/{content_length}'
+            return partial_content
 
         requests_mock.get(
             self.TEST_URL, headers={'accept-ranges': 'bytes'}, content=content_callback
@@ -177,7 +177,8 @@ class TestHttpIO:
     def test_enter(self, http_io: HttpIO):
         """Test context management protocol on ``HttpIO`` objects."""
         with http_io as f:
-            assert type(f) == HttpIO
+            assert type(f) is HttpIO
+        # skipcq: PTC-W0062
         with pytest.raises(ValueError, match='I/O operation on closed file'):
             with http_io:
                 pass
