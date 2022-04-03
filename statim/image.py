@@ -306,7 +306,6 @@ class ExtractJob(NamedTuple):
 
     filepath_iso: Path of the file to extract, relative to the ISO root directory.
     filepath_local: Desired path of the file on the local file system.
-    iso_path_type: Required for PyCdlib API.
     """
 
     filepath_iso: PurePosixPath
@@ -570,24 +569,33 @@ def _extract(
 
         log.debug(f'Opened ISO after {(time.perf_counter() - time_start):.4f} seconds')
 
-        # get file size
-        size = source_file.seek(0, 2)
-        source_file.seek(0, 0)
-        log.debug(f'ISO size: {size} bytes')
-
-        space_available = sum(disk_usage(path).free for path in target_paths)
-        log.debug(
-            f'Total space available at target directories: {space_available} bytes'
-        )
-        if space_available + TARGET_PATHS_EXTRA_FREE_SPACE < size:
-            raise ValueError('Not enough disk space available at target directories')
-
+        # select ISO extension
         iso_facade = _get_facade_for_iso(iso)
         iso_format_str = iso_facade.__class__.__name__.strip("PyCdlib")
         log.debug(f'Selected ISO format {iso_format_str!r}')
 
         if isinstance(iso_facade, PyCdlibISO9660):
             log.warning('Fallback to pure ISO 9660 format')
+
+        # size checks
+        size = source_file.seek(0, 2)
+        source_file.seek(0, 0)
+        log.debug(f'ISO size: {size} bytes')
+
+        size_contents = 0
+        for dirpath_iso, _, filelist in iso_facade.walk('/'):
+            for filename in filelist:
+                filepath_iso_abs = PurePosixPath(dirpath_iso) / filename
+                record = iso_facade.get_record(str(filepath_iso_abs))
+                size_contents += record.get_data_length()
+        log.debug(f'ISO size (contents): {size_contents} bytes')
+
+        space_available = sum(disk_usage(path).free for path in target_paths)
+        log.debug(
+            f'Total space available at target directories: {space_available} bytes'
+        )
+        if space_available + TARGET_PATHS_EXTRA_FREE_SPACE < size_contents:
+            raise ValueError('Not enough disk space available at target directories')
 
         # actual extraction
         time_extraction_start = time.perf_counter()
