@@ -27,8 +27,8 @@ class QuietTestStrEnum(str, QuietEnum):
 
 @pytest.mark.parametrize('enum', [UsualTestEnum, QuietTestEnum, QuietTestStrEnum])
 def test_quiet_enum(enum):
-    """Test that ``QuietEnum`` subclasses exported by pydantic have their *title* and
-    *description* values removed and usual ``Enum`` subclasses have not.
+    """Test that ``QuietEnum`` subclasses exported by pydantic have their `title` and
+    `description` values removed and usual ``Enum`` subclasses have not.
     """
     assert issubclass(enum, Enum)
 
