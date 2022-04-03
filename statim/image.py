@@ -105,6 +105,10 @@ class HttpIO(IOBase, BinaryIO):
         self._length = int(headers['content-length'])
         self._pos = 0
 
+    def __repr__(self) -> str:
+        """Return a printable representation of the object."""
+        return f'{self.__class__.__name__}(url={self._url!r})'
+
     def _check_closed(self) -> None:
         """Raise a ``ValueError`` if the file is closed."""
         if self.closed:  # skipcq: PYL-W0125
