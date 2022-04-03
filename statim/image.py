@@ -59,7 +59,7 @@ class HttpIO(IOBase, BinaryIO):
     """Access a file available via HTTP like a file-like object.
 
     Supported operations are seeking and reading. This is accomplished by utilizing
-    the HTTP *Range* header.
+    the HTTP `Range` header.
 
     Raises an ``OSError`` if the server doesn't support range requests.
     """
@@ -254,8 +254,8 @@ def tps_win10_uefi(filepath_iso: PurePosixPath, target_paths: tuple[Path, ...]) 
     Windows 10 or newer ISO image file if this ISO image file is used to create a
     bootable USB drive for a UEFI system.
 
-    Chooses the second target path (NTFS volume) for the *sources* folder except
-    *sources/boot.wim*.
+    Chooses the second target path (NTFS volume) for the `sources` directory except
+    `sources/boot.wim`.
     Chooses the first target path for everything else.
 
     For more information on why we copy the installation files of Windows 10+ images
