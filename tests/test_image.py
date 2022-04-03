@@ -185,14 +185,18 @@ class TestHttpIO:
 
     @pytest.mark.parametrize('http_io', TEST_DATA, indirect=True)
     def test_properties(self, http_io: HttpIO):
-        """Test that ``HttpIO`` objects are seekable, read-only binary streams whose
-        ``name`` properties equal the URL passed to their ``__init__`` method.
+        """Test that ``HttpIO`` objects are seekable, read-only binary streams.
+
+        Also test that the printable representation of an ``HttpIO`` object contains
+        the URL the object was initialized with.
         """
         assert http_io.mode == 'rb'
-        assert http_io.name == self.TEST_URL
         assert http_io.readable() is True
         assert http_io.writable() is False
         assert http_io.seekable() is True
+
+        assert http_io.name == self.TEST_URL
+        assert repr(http_io) == f'HttpIO(url={self.TEST_URL!r})'
 
     @pytest.mark.parametrize(
         ['http_io', 'data'], zip(TEST_DATA, TEST_DATA), indirect=['http_io']
