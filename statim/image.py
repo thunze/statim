@@ -406,25 +406,17 @@ def _extract_worker(
                     # pycdlib doesn't like pathlib paths
                     file_iso = iso_facade.open_file_from_iso(str(filepath_iso_abs))
                 except PyCdlibInvalidInput as e:
-                    # Sometimes an El Torito boot catalog is represented by a data
-                    # file in an ISO image (e.g. '/isolinux/boot.cat'). If we try to
-                    # open such a data file using open_file_from_iso, an exception
-                    # with the message 'File has no data' is raised because this edge
-                    # case is not handled. However it is handled by get_file_from_iso.
+                    # An El Torito boot catalog is also represented by a data file in
+                    # an ISO image (e.g. '/isolinux/boot.cat'). If we try to open
+                    # such a data file using open_file_from_iso, an exception with
+                    # the message 'File has no data' is raised because this edge case
+                    # is not handled. As such a file serves no purpose in the file
+                    # system itself, we can safely skip its extraction.
                     if str(e) == 'File has no data':
-                        log.debug(f'Suspecting boot catalog at {filepath_iso_abs}')
-
-                        with filepath_local.open('wb') as file_local:
-                            start_pos = file_local.tell()
-                            iso_facade.get_file_from_iso_fp(
-                                file_local,
-                                str(filepath_iso_abs),
-                            )
-                            end_pos = file_local.tell()
-                            # sync with other threads
-                            with progress.get_lock():
-                                progress.value += end_pos - start_pos
-                            extract_queue.task_done()
+                        log.debug(
+                            f'Skipping suspected boot catalog at {filepath_iso_abs}'
+                        )
+                        extract_queue.task_done()
                     else:
                         raise
                 else:
