@@ -416,6 +416,9 @@ def _extract_worker(
                         log.debug(
                             f'Skipping suspected boot catalog at {filepath_iso_abs}'
                         )
+                        skipped_record = iso_facade.get_record(str(filepath_iso_abs))
+                        with progress.get_lock():
+                            progress.value += skipped_record.get_data_length()
                         extract_queue.task_done()
                     else:
                         raise
@@ -570,23 +573,24 @@ def _extract(
             log.warning('Fallback to pure ISO 9660 format')
 
         # size checks
-        size = source_file.seek(0, 2)
-        source_file.seek(0, 0)
-        log.debug(f'ISO size: {size} bytes')
-
-        size_contents = 0
+        size = 0  # ISO contents
         for dirpath_iso, _, filelist in iso_facade.walk('/'):
             for filename in filelist:
                 filepath_iso_abs = PurePosixPath(dirpath_iso) / filename
                 record = iso_facade.get_record(str(filepath_iso_abs))
-                size_contents += record.get_data_length()
-        log.debug(f'ISO size (contents): {size_contents} bytes')
+                size += record.get_data_length()
+
+        size_container = source_file.seek(0, 2)  # ISO file
+        source_file.seek(0, 0)
+
+        log.debug(f'ISO size: {size_container} bytes')
+        log.debug(f'ISO size (contents): {size} bytes')
 
         space_available = sum(disk_usage(path).free for path in target_paths)
         log.debug(
             f'Total space available at target directories: {space_available} bytes'
         )
-        if space_available + TARGET_PATHS_EXTRA_FREE_SPACE < size_contents:
+        if space_available + TARGET_PATHS_EXTRA_FREE_SPACE < size:
             raise ValueError('Not enough disk space available at target directories')
 
         # actual extraction
@@ -654,8 +658,12 @@ def _extract(
                     seconds_delta_start += time.perf_counter() - pause_start
                     resume_event.set()
 
-            # last progress update: bytes_done would otherwise always stay a little
-            # less than size because of the included overhead in size
+            # last progress update: incl. bytes remaining because of PROGRESS_UPDATE_GAP
+            if progress.value != size:
+                log.warning(
+                    f'Size of extracted files does not match calculated size '
+                    f'(expected {size} bytes, got {progress.value} bytes)'
+                )
             progress.value = size
             seconds_delta = time.perf_counter() - seconds_delta_start
             bytes_delta = size - bytes_delta_start
