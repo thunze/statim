@@ -479,18 +479,29 @@ class ExtractProgress(NamedTuple):
     @property
     def done_ratio(self) -> float:
         """Ratio of already extracted bytes to bytes to extract in total."""
+        if self.bytes_total <= 0:
+            return 1.0
         return self.bytes_done / self.bytes_total
 
     @property
-    def bytes_per_second(self) -> float:
+    def bytes_per_second(self) -> Optional[float]:
         """Average extraction speed since the last progress update in bytes per
         second.
+
+        ``None`` if the extraction speed can't be calculated reliably.
         """
+        if self.seconds_delta <= 0:
+            return None  # quite unlikely to happen
         return self.bytes_delta / self.seconds_delta
 
     @property
-    def seconds_left(self) -> float:
-        """Estimated time required for extracting the remaining data in seconds."""
+    def seconds_left(self) -> Optional[float]:
+        """Estimated time required for extracting the remaining data in seconds.
+
+        ``None`` if the estimated time left can't be calculated reliably.
+        """
+        if self.bytes_per_second is None or self.bytes_per_second <= 0:
+            return None
         return (self.bytes_total - self.bytes_done) / self.bytes_per_second
 
 
@@ -684,9 +695,11 @@ def _extract(
         extraction_time = time.perf_counter() - time_extraction_start
 
         log.info(f'Finished ISO image extraction after {extraction_time:.4f} seconds')
-        log.info(
-            f'Average extraction speed: {(size / extraction_time):.4f} bytes per second'
-        )
+        if extraction_time > 0:
+            log.info(
+                f'Average extraction speed: {size / extraction_time:.4f} bytes per '
+                f'second'
+            )
 
 
 @contextmanager
