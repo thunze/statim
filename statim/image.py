@@ -54,7 +54,8 @@ EXTRACT_QUEUE_TIMEOUT = 1  # seconds
 EXC_QUEUE_TIMEOUT = 0.05  # seconds
 PAUSE_TIMEOUT = 0.05  # seconds
 
-PROGRESS_UPDATE_GAP = 0.5  # min seconds between extraction progress updates
+PROGRESS_UPDATE_MIN_GAP = 0.5  # min seconds between extraction progress updates
+PROGRESS_UPDATE_MAX_GAP = 5.0  # max seconds between extraction progress updates
 
 
 class HttpIO(IOBase, BinaryIO):
@@ -517,10 +518,8 @@ def _extract(
 
     # prepare threading
     if isinstance(source, LocalSource):
-        chunk_size = CHUNK_SIZE_LOCAL
         max_workers = MAX_WORKERS_LOCAL
     else:
-        chunk_size = CHUNK_SIZE_REMOTE
         max_workers = MAX_WORKERS_REMOTE
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -566,7 +565,7 @@ def _extract(
 
         # select ISO extension
         iso_facade = _get_facade_for_iso(iso)
-        iso_format_str = iso_facade.__class__.__name__.strip("PyCdlib")
+        iso_format_str = iso_facade.__class__.__name__.strip('PyCdlib')
         log.debug(f'Selected ISO format {iso_format_str!r}')
 
         if isinstance(iso_facade, PyCdlibISO9660):
@@ -631,18 +630,17 @@ def _extract(
                     raise RuntimeError('Exception raised in worker thread') from exc
 
                 extract_progress = None
+                seconds_delta_end = time.perf_counter()
+                seconds_delta = seconds_delta_end - seconds_delta_start
 
-                # send a progress update at most every PROGRESS_UPDATE_GAP seconds
-                if time.perf_counter() - seconds_delta_start >= PROGRESS_UPDATE_GAP:
-                    seconds_delta_end = time.perf_counter()
+                # send a progress update at most every PROGRESS_UPDATE_MIN_GAP seconds
+                if seconds_delta >= PROGRESS_UPDATE_MIN_GAP:
                     bytes_delta_end = progress.value
-
-                    seconds_delta = seconds_delta_end - seconds_delta_start
                     bytes_delta = bytes_delta_end - bytes_delta_start
 
-                    # only send an actual ExtractProgress (and not None) if something
-                    # significantly changed
-                    if bytes_delta >= chunk_size:
+                    # only send an actual ExtractProgress (and not None) if at least one
+                    # byte was extracted or if it's enforced by PROGRESS_UPDATE_MAX_GAP
+                    if bytes_delta > 0 or seconds_delta >= PROGRESS_UPDATE_MAX_GAP:
                         extract_progress = ExtractProgress(
                             size, bytes_delta_end, seconds_delta, bytes_delta
                         )
@@ -658,12 +656,13 @@ def _extract(
                     seconds_delta_start += time.perf_counter() - pause_start
                     resume_event.set()
 
-            # last progress update: incl. bytes remaining because of PROGRESS_UPDATE_GAP
             if progress.value != size:
                 log.warning(
                     f'Size of extracted files does not match calculated size '
                     f'(expected {size} bytes, got {progress.value} bytes)'
                 )
+
+            # last progress update
             progress.value = size
             seconds_delta = time.perf_counter() - seconds_delta_start
             bytes_delta = size - bytes_delta_start
