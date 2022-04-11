@@ -3,7 +3,7 @@
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
-from contextlib import contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from io import SEEK_CUR, SEEK_END, SEEK_SET, IOBase, UnsupportedOperation
 from multiprocessing import Value
 from pathlib import Path, PurePosixPath
@@ -25,6 +25,7 @@ import requests
 from pycdlib import PyCdlib
 from pycdlib.facade import PyCdlibISO9660, PyCdlibJoliet, PyCdlibRockRidge, PyCdlibUDF
 from pycdlib.pycdlibexception import PyCdlibInvalidInput
+from requests import Response
 from requests.adapters import HTTPAdapter, Retry
 
 from .plan import LocalSource, RemoteSource
@@ -43,9 +44,11 @@ HTTP_RETRY_STRATEGY = Retry(
     total=5, backoff_factor=0.5, status_forcelist=(500, 502, 503, 504)
 )
 
+_KIB = 1024
 _MIB = 1024 * 1024
 CHUNK_SIZE_LOCAL = 4 * _MIB
-CHUNK_SIZE_REMOTE = 1 * _MIB
+CHUNK_SIZE_REMOTE = 1 * _MIB  # plain HttpIO
+CHUNK_SIZE_REMOTE_CHUNKED = 4 * _KIB  # HttpIO with chunked transfer
 TARGET_PATHS_EXTRA_FREE_SPACE = 1 * _MIB  # safety buffer for additional files
 
 MAX_WORKERS_LOCAL = 1
@@ -106,6 +109,9 @@ class HttpIO(IOBase, BinaryIO):
         self._length = int(headers['content-length'])
         self._pos = 0
 
+        # chunked transfer: tuple of (chunks, chunk size)
+        self._chunked_transfer: Optional[tuple[Iterator[bytes], int]] = None
+
     def __repr__(self) -> str:
         """Return a printable representation of the object."""
         return f'{self.__class__.__name__}(url={self._url!r})'
@@ -114,6 +120,11 @@ class HttpIO(IOBase, BinaryIO):
         """Raise a ``ValueError`` if the file is closed."""
         if self.closed:  # skipcq: PYL-W0125
             raise ValueError('I/O operation on closed file')
+
+    def _check_chunked_transfer(self) -> None:
+        """Raise a ``ValueError`` if a chunked transfer is currently active."""
+        if self._chunked_transfer is not None:
+            raise ValueError('Random-access operation during chunked transfer')
 
     def __enter__(self) -> 'HttpIO':
         """Context management protocol.
@@ -133,15 +144,11 @@ class HttpIO(IOBase, BinaryIO):
 
     @property
     def name(self) -> str:
-        """URL this instance reads from."""
+        """URL the instance reads from."""
         return self._url
 
     def write(self, b: bytes) -> int:
-        """Write the given buffer to the IO stream.
-
-        Returns the number of bytes written, which may be less than the length of ``b``
-        in bytes.
-        """
+        """Write the given buffer to the IO stream. Unsupported."""
         raise UnsupportedOperation(f'{self.__class__.__name__}.write() not supported')
 
     def readable(self) -> bool:
@@ -154,9 +161,96 @@ class HttpIO(IOBase, BinaryIO):
     def seekable(self) -> bool:
         """Return a ``bool`` indicating whether the object supports random access.
 
-        True for all ``HttpIO`` instances.
+        True if no chunked transfer is active.
         """
-        return True
+        return self._chunked_transfer is None
+
+    def _range_request(
+        self, first_byte_pos: int, last_byte_pos: int, stream: bool = False
+    ) -> Response:
+        """Request the byte range from ``first_byte_pos`` to ``last_byte_pos`` (both
+        inclusive) and return the resulting ``requests.Response`` object.
+
+        If the ``stream`` flag is set, the content is not downloaded immediately.
+        """
+        headers = {'range': f'bytes={first_byte_pos}-{last_byte_pos}'}
+
+        response = self._session.get(
+            self._url, headers=headers, timeout=HTTP_TIMEOUT, stream=stream
+        )
+        response.raise_for_status()
+
+        if response.status_code != 206 or 'content-range' not in response.headers:
+            raise OSError('Server did not send a partial response')
+        return response
+
+    @contextmanager
+    def chunked_transfer(self, chunk_size: int) -> Iterator[Iterator[bytes]]:
+        """Start a chunked transfer.
+
+        While operating in the context this context manager provides, reading is done
+        using *chunked transfer encoding* instead of sending out separate range
+        requests every time ``read`` is invoked. This can lead to faster read
+        operations, but only allows data to be read in its chronological order in
+        chunks of ``chunk_size`` bytes (or less if it's the last chunk).
+
+        The transfer starts at the current stream position and carries on until EOF.
+        The chunks can be retrieved either by iterating over the generator this
+        context manager provides or by repeatedly invoking ``read(chunk_size)`` (see
+        example). If ``read`` is invoked with an argument of less than ``chunk_size``
+        (and greater than 0), the whole chunk is consumed, but only the requested part
+        of it is returned.
+
+        Note that per ``HttpIO`` object only one chunked transfer can be active at
+        the same time.
+
+        Example::
+
+            with HttpIO('https://example.test/test_file') as http_io:
+                http_io.seek(1337)  # where the chunked transfer is supposed to start
+                with http_io.chunked_transfer(1024) as chunked_transfer:
+                    for chunk in chunked_transfer:
+                        print(chunk)
+                    # or
+                    while True:
+                        chunk = http_io.read(1024)  # or less
+                        if not chunk:
+                            break
+                # left context, so random access is possible again
+                http_io.seek(0)
+                http_io.read(2048)
+        """
+        self._check_closed()
+
+        if self._chunked_transfer is not None:
+            raise ValueError('Another chunked transfer is already active')
+        if chunk_size <= 0:
+            raise ValueError(f'Chunk size must be greater than 0, got {chunk_size}')
+
+        def chunk_wrapper(chunks_: Iterator[bytes]) -> Iterator[bytes]:
+            """Iterator wrapper to make the ``HttpIO`` object keep track of the
+            current stream position during chunked transfer.
+            """
+            for chunk in chunks_:
+                self._pos += len(chunk)  # last chunk might be smaller than chunk size
+                yield chunk
+
+        response: Optional[Response] = None
+        try:
+            if self._pos >= self._length:
+                chunks = iter(())  # empty iterator
+            else:
+                # request up to EOF
+                response = self._range_request(self._pos, self._length - 1, stream=True)
+                chunks = response.iter_content(chunk_size)
+
+            self._chunked_transfer = (chunks, chunk_size)
+            yield chunk_wrapper(chunks)
+
+        finally:
+            self._chunked_transfer = None
+            if response is not None:
+                response.close()
 
     def read(self, size: int = -1) -> bytes:
         """Read and return up to ``size`` bytes.
@@ -170,27 +264,34 @@ class HttpIO(IOBase, BinaryIO):
         if size < 0 or self._pos + size > self._length:
             size = self._length - self._pos
 
-        # range request
-        first_byte_pos = self._pos
-        last_byte_pos = self._pos + size - 1  # inclusive!
-        headers = {'range': f'bytes={first_byte_pos}-{last_byte_pos}'}
+        if self._chunked_transfer is not None:
+            chunks, chunk_size = self._chunked_transfer
 
-        response = self._session.get(self._url, headers=headers, timeout=HTTP_TIMEOUT)
-        response.raise_for_status()
+            if size > chunk_size:
+                raise ValueError(
+                    f'Can only read in chunks of {chunk_size} bytes or less during '
+                    f'chunked transfer ({size} bytes requested)'
+                )
+            # consume whole chunk
+            data = next(chunks)
+            new_pos = self._pos + len(data)
 
-        if response.status_code != 206 or 'content-range' not in response.headers:
-            raise OSError('Server did not send a partial response')
+            # but return less if requested
+            if size < chunk_size:
+                data = data[:size]
+        else:
+            response = self._range_request(self._pos, self._pos + size - 1)
+            data = response.content
+            new_pos = self._pos + len(data)
 
-        data = response.content
         actual_size = len(data)
-
         if actual_size != size:
             raise ConnectionError(
                 f'Server did not send the requested amount of bytes (expected {size}, '
                 f'got {actual_size})'
             )
 
-        self._pos += actual_size
+        self._pos = new_pos
         return data
 
     def readall(self) -> bytes:
@@ -211,6 +312,8 @@ class HttpIO(IOBase, BinaryIO):
         Returns an ``int`` indicating the new absolute position.
         """
         self._check_closed()
+        self._check_chunked_transfer()
+
         if whence == SEEK_SET:
             if offset < 0:
                 raise ValueError(f'Negative seek position {offset}')
@@ -365,24 +468,26 @@ def _extract_worker(
         return quit_event.is_set()
 
     try:
-        source_file: BinaryIO
-        if isinstance(source, LocalSource):
-            chunk_size = CHUNK_SIZE_LOCAL
-            source_file = source.path.open(mode='rb')
-        else:
-            chunk_size = CHUNK_SIZE_REMOTE
-            source_file = HttpIO(source.url)
+        # contexts active for the lifetime of the worker
+        with ExitStack() as worker_stack:
+            source_file: BinaryIO
+            if isinstance(source, LocalSource):
+                source_file = source.path.open(mode='rb')
+            else:
+                source_file = HttpIO(source.url)
+            # noinspection PyTypeChecker
+            worker_stack.enter_context(source_file)
 
-        with source_file:
             # open ISO
             iso = PyCdlib()
             iso.open_fp(source_file)  # this might take a while
+            worker_stack.enter_context(closing(iso))
+
             try:
                 open_result = OpenResult(source_file, iso)
                 open_result_queue.put(open_result, block=False)
             except Full:
-                # main thread only needs (source_file, iso) once
-                pass
+                pass  # main thread only needs (source_file, iso) once
 
             iso_facade = _get_facade_for_iso(iso)
 
@@ -421,42 +526,57 @@ def _extract_worker(
                         with progress.get_lock():
                             progress.value += skipped_record.get_data_length()
                         extract_queue.task_done()
+                        continue
                     else:
                         raise
-                else:
-                    # open_file_from_iso succeeded
-                    with file_iso, filepath_local.open('wb') as file_local:
-                        file_bytes_total = file_iso.length()
-                        file_bytes_left = file_bytes_total
 
-                        # read and write chunk by chunk
-                        while not pause_or_quit() and file_bytes_left > 0:
-                            bytes_expected = min(chunk_size, file_bytes_left)
-                            chunk = file_iso.read(bytes_expected)
-                            bytes_read = len(chunk)
-                            bytes_written = file_local.write(chunk)
+                # open_file_from_iso succeeded
+                # contexts active for the current extraction job
+                with ExitStack() as job_stack:
+                    job_stack.enter_context(file_iso)
+                    file_local = job_stack.enter_context(filepath_local.open('wb'))
+                    file_bytes_total = file_iso.length()
+                    file_bytes_left = file_bytes_total
 
-                            if bytes_read != bytes_expected:
-                                raise OSError(
-                                    f'Did not read the expected amount of bytes '
-                                    f'(expected {bytes_expected} bytes, read '
-                                    f'{bytes_read} bytes)'
-                                )
-                            if bytes_written != bytes_read:
-                                raise OSError(
-                                    f'Did not write the expected amount of bytes (read '
-                                    f'{bytes_expected} bytes, wrote {bytes_read} bytes)'
-                                )
+                    if isinstance(source_file, HttpIO):
+                        # use chunked transfer for larger files
+                        if file_bytes_total > CHUNK_SIZE_REMOTE_CHUNKED:
+                            # noinspection PyTypeChecker
+                            job_stack.enter_context(
+                                source_file.chunked_transfer(CHUNK_SIZE_REMOTE_CHUNKED)
+                            )
+                            chunk_size = CHUNK_SIZE_REMOTE_CHUNKED
+                        else:
+                            chunk_size = CHUNK_SIZE_REMOTE
+                    else:
+                        chunk_size = CHUNK_SIZE_LOCAL
 
-                            file_bytes_left -= bytes_written
+                    # read and write chunk by chunk
+                    while not pause_or_quit() and file_bytes_left > 0:
+                        bytes_expected = min(chunk_size, file_bytes_left)
+                        chunk = file_iso.read(bytes_expected)
+                        bytes_read = len(chunk)
+                        bytes_written = file_local.write(chunk)
 
-                            # sync with other threads
-                            with progress.get_lock():
-                                progress.value += bytes_written
+                        if bytes_read != bytes_expected:
+                            raise OSError(
+                                f'Did not read the expected amount of bytes (expected '
+                                f'{bytes_expected} bytes, read {bytes_read} bytes)'
+                            )
+                        if bytes_written != bytes_read:
+                            raise OSError(
+                                f'Did not write the expected amount of bytes (read '
+                                f'{bytes_expected} bytes, wrote {bytes_read} bytes)'
+                            )
 
-                        if file_bytes_left == 0:
-                            extract_queue.task_done()
-            iso.close()
+                        file_bytes_left -= bytes_written
+
+                        # sync with other threads
+                        with progress.get_lock():
+                            progress.value += bytes_written
+
+                    if file_bytes_left == 0:
+                        extract_queue.task_done()
 
     except BaseException as e:
         exc_queue.put(e)
