@@ -19,6 +19,7 @@ class TestHttpIO:
         {'accept-ranges': 'bytes', 'content-length': '16', 'content-encoding': ''},
     ]
     TEST_DATA = [b'', b'test', b'The knots will tie you down! ' * 7, randbytes(443)]
+    TEST_CHUNK_SIZES = [1, 2, 7, 100]
 
     # Fixtures
 
@@ -407,3 +408,167 @@ class TestHttpIO:
         http_io.close()
         with pytest.raises(ValueError, match='I/O operation on closed file'):
             getattr(http_io, method)(*args)
+
+    @pytest.mark.parametrize(
+        ['http_io', 'data', 'pos'],
+        [
+            (data, data, pos)
+            for data in TEST_DATA
+            for pos in [0, len(data) // 2, len(data)]
+        ],
+        indirect=['http_io'],
+    )
+    @pytest.mark.parametrize('chunk_size', TEST_CHUNK_SIZES)
+    def test_chunked_transfer_success(self, http_io: HttpIO, data, pos, chunk_size):
+        """Test successful chunked transfer scenarios."""
+        http_io.seek(pos)
+
+        # using the iterator provided by the context manager
+        with http_io.chunked_transfer(chunk_size) as chunks:
+            chunk_list = []
+            last_pos = http_io.tell()
+
+            for chunk in chunks:
+                chunk_list.append(chunk)
+                assert chunk == data[last_pos : last_pos + chunk_size]
+                assert http_io.tell() == min(last_pos + chunk_size, len(data))
+                last_pos = http_io.tell()
+
+            assert b''.join(chunk_list) == data[pos:]
+            assert http_io.tell() == len(data)
+
+        http_io.seek(pos)
+
+        # using httpio.read -- read in chunks of chunk_size bytes
+        with http_io.chunked_transfer(chunk_size):
+            chunk_list = []
+            last_pos = http_io.tell()
+
+            while True:
+                chunk = http_io.read(chunk_size)
+                chunk_list.append(chunk)
+                assert chunk == data[last_pos : last_pos + chunk_size]
+                assert http_io.tell() == min(last_pos + chunk_size, len(data))
+
+                if not chunk:
+                    assert b''.join(chunk_list) == data[pos:]
+                    assert http_io.tell() == len(data)
+                    break
+
+                last_pos = http_io.tell()
+
+        http_io.seek(pos)
+
+        # using httpio.read -- read less than chunk_size bytes
+        with http_io.chunked_transfer(chunk_size):
+            read_size_less = chunk_size - 1
+            chunk = http_io.read(read_size_less)
+            assert chunk == data[pos : pos + read_size_less]
+
+            if read_size_less == 0:
+                assert http_io.tell() == pos  # chunk not consumed
+            else:
+                # whole chunk consumed (!)
+                assert http_io.tell() == min(pos + chunk_size, len(data))
+
+        # back to usual IO
+        assert http_io.seekable()
+        http_io.seek(pos)
+        read_size_less = chunk_size - 1
+        assert http_io.read(read_size_less) == data[pos : pos + read_size_less]
+        assert http_io.tell() == min(pos + read_size_less, len(data))
+
+    @pytest.mark.parametrize('http_io', TEST_DATA, indirect=True)
+    def test_chunked_transfer_fail_already_active(self, http_io: HttpIO):
+        """Test that starting a new chunked transfer fails if another chunked
+        transfer is already active.
+        """
+        # skipcq: PTC-W0062
+        with http_io.chunked_transfer(1):
+            with pytest.raises(
+                ValueError, match='Another chunked transfer is already active'
+            ):
+                with http_io.chunked_transfer(2):
+                    pass
+
+            assert not http_io.seekable()
+
+    @pytest.mark.parametrize('http_io', TEST_DATA, indirect=True)
+    @pytest.mark.parametrize('chunk_size', [-5, -1, 0])
+    def test_chunked_transfer_fail_chunk_size(self, http_io: HttpIO, chunk_size):
+        """Test that starting a new chunked transfer with a chunk size not greater
+        than 0 fails.
+        """
+        # skipcq: PTC-W0062
+        with pytest.raises(
+            ValueError, match=r'Chunk size must be greater than 0, got -?\d+'
+        ):
+            with http_io.chunked_transfer(chunk_size):
+                pass
+
+    @pytest.mark.parametrize(
+        ['http_io', 'data', 'pos'],
+        [
+            (data, data, pos)
+            for data in TEST_DATA
+            for pos in [0, len(data) // 2, len(data)]
+        ],
+        indirect=['http_io'],
+    )
+    @pytest.mark.parametrize('chunk_size', TEST_CHUNK_SIZES)
+    def test_chunked_transfer_fail_read(self, http_io: HttpIO, data, pos, chunk_size):
+        """Test that during chunked transfer trying to read more data than specified
+        by ``chunk_size`` at once fails.
+        """
+        http_io.seek(pos)
+        bytes_left = len(data) - pos
+        exc_message = (
+            rf'Can only read in chunks of {chunk_size} bytes or less during chunked '
+            r'transfer \({} bytes requested\)'
+        )
+
+        with http_io.chunked_transfer(chunk_size):
+            if bytes_left > chunk_size:
+
+                for read_size in [chunk_size + 1, chunk_size + 20]:
+                    with pytest.raises(
+                        ValueError, match=exc_message.format(min(bytes_left, read_size))
+                    ):
+                        http_io.read(read_size)
+
+                with pytest.raises(ValueError, match=exc_message.format(bytes_left)):
+                    http_io.read(-1)
+                with pytest.raises(ValueError, match=exc_message.format(bytes_left)):
+                    http_io.readall()
+                with pytest.raises(ValueError, match=exc_message.format(bytes_left)):
+                    http_io.read()
+
+                assert http_io.tell() == pos
+
+    @pytest.mark.parametrize('http_io', TEST_DATA, indirect=True)
+    @pytest.mark.parametrize(['offset', 'whence'], [(1, 0), (1, 1), (-1, 2)])
+    def test_chunked_transfer_fail_seek(self, http_io: HttpIO, offset, whence):
+        """Test that seeking fails during chunked transfer."""
+        assert http_io.seekable()
+
+        with http_io.chunked_transfer(1):
+            assert not http_io.seekable()
+
+            with pytest.raises(
+                ValueError, match='Random-access operation during chunked transfer'
+            ):
+                http_io.seek(offset, whence)
+
+            assert not http_io.seekable()
+        assert http_io.seekable()
+
+    @pytest.mark.parametrize('http_io', TEST_DATA, indirect=True)
+    def test_chunked_transfer_fail_context_left(self, http_io: HttpIO):
+        """Test that the iterator provided by ``chunked_transfer`` stops if its
+        context is left.
+        """
+        # skipcq: PTC-W0062
+        with http_io.chunked_transfer(1) as chunks:
+            pass
+        with pytest.raises(StopIteration):
+            next(chunks)
