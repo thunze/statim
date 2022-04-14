@@ -6,32 +6,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, closing, contextmanager
 from io import SEEK_CUR, SEEK_END, SEEK_SET, IOBase, UnsupportedOperation
 from multiprocessing import Value
+from multiprocessing.sharedctypes import Synchronized
 from pathlib import Path, PurePosixPath
 from queue import Empty, Full, Queue
 from shutil import disk_usage
 from threading import Event
-from typing import (
-    TYPE_CHECKING,
-    BinaryIO,
-    Callable,
-    Generator,
-    Iterator,
-    NamedTuple,
-    Optional,
-    Union,
-)
+from typing import BinaryIO, Callable, Generator, Iterator, NamedTuple, Optional, Union
 
 import requests
 from pycdlib import PyCdlib
 from pycdlib.facade import PyCdlibISO9660, PyCdlibJoliet, PyCdlibRockRidge, PyCdlibUDF
 from pycdlib.pycdlibexception import PyCdlibInvalidInput
-from requests import Response
 from requests.adapters import HTTPAdapter, Retry
 
 from .plan import LocalSource, RemoteSource
-
-if TYPE_CHECKING:
-    from multiprocessing.sharedctypes import Synchronized
 
 __all__ = ['extract', 'ExtractProgress', 'tps_default', 'tps_win10_uefi']
 
@@ -167,7 +155,7 @@ class HttpIO(IOBase, BinaryIO):
 
     def _range_request(
         self, first_byte_pos: int, last_byte_pos: int, stream: bool = False
-    ) -> Response:
+    ) -> requests.Response:
         """Request the byte range from ``first_byte_pos`` to ``last_byte_pos`` (both
         inclusive) and return the resulting ``requests.Response`` object.
 
@@ -235,7 +223,7 @@ class HttpIO(IOBase, BinaryIO):
                 self._pos += len(chunk)  # last chunk might be smaller than chunk size
                 yield chunk
 
-        response: Optional[Response] = None
+        response: Optional[requests.Response] = None
         try:
             if self._pos >= self._length:
                 chunks = iter(())  # empty iterator
@@ -508,6 +496,29 @@ def _extract_worker(
                 filepath_iso_abs = '/' / filepath_iso
                 log.debug(f'Extracting {filepath_iso_abs} -> {filepath_local}')
 
+                # symlink
+                record = iso_facade.get_record(str(filepath_iso_abs))
+                if record.is_symlink():
+                    if not isinstance(iso_facade, PyCdlibRockRidge):
+                        log.warning(
+                            f'Skipping non-Rock Ridge symlink at {filepath_iso_abs}'
+                        )
+                        extract_queue.task_done()
+                        continue
+
+                    symlink_target = PurePosixPath(
+                        record.rock_ridge.symlink_path().decode('utf-8')
+                    )
+                    if symlink_target.is_absolute():
+                        log.warning(f'Skipping absolute symlink at {filepath_iso_abs}')
+                        extract_queue.task_done()
+                        continue
+
+                    symlink_target_abs = filepath_local.parent / symlink_target
+                    filepath_local.symlink_to(symlink_target_abs)
+                    extract_queue.task_done()
+                    continue
+
                 try:
                     # pycdlib doesn't like pathlib paths
                     file_iso = iso_facade.open_file_from_iso(str(filepath_iso_abs))
@@ -708,7 +719,8 @@ def _extract(
             for filename in filelist:
                 filepath_iso_abs = PurePosixPath(dirpath_iso) / filename
                 record = iso_facade.get_record(str(filepath_iso_abs))
-                size += record.get_data_length()
+                if not record.is_symlink():
+                    size += record.get_data_length()
 
         size_container = source_file.seek(0, 2)  # ISO file
         source_file.seek(0, 0)
