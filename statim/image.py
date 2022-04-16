@@ -6,12 +6,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, closing, contextmanager
 from io import SEEK_CUR, SEEK_END, SEEK_SET, IOBase, UnsupportedOperation
 from multiprocessing import Value
-from multiprocessing.sharedctypes import Synchronized
 from pathlib import Path, PurePosixPath
 from queue import Empty, Full, Queue
 from shutil import disk_usage
 from threading import Event
-from typing import BinaryIO, Callable, Generator, Iterator, NamedTuple, Optional, Union
+from typing import (
+    TYPE_CHECKING,
+    BinaryIO,
+    Callable,
+    Generator,
+    Iterator,
+    NamedTuple,
+    Optional,
+    Union,
+)
 
 import requests
 from pycdlib import PyCdlib
@@ -20,6 +28,9 @@ from pycdlib.pycdlibexception import PyCdlibInvalidInput
 from requests.adapters import HTTPAdapter, Retry
 
 from .plan import LocalSource, RemoteSource
+
+if TYPE_CHECKING:
+    from multiprocessing.sharedctypes import Synchronized
 
 __all__ = ['extract', 'ExtractProgress', 'tps_default', 'tps_win10_uefi']
 
@@ -331,7 +342,7 @@ class HttpIO(IOBase, BinaryIO):
 
 # --- Target path strategies
 
-# noinspection PyUnusedLocal
+
 def tps_default(filepath_iso: PurePosixPath, target_paths: tuple[Path, ...]) -> Path:
     """Default strategy to determine the correct target path for a specific file
     present in an ISO image file.
@@ -342,8 +353,8 @@ def tps_default(filepath_iso: PurePosixPath, target_paths: tuple[Path, ...]) -> 
         raise ValueError(
             f'Strategy requires at least 1 target path, got {target_paths}'
         )
-    if filepath_iso.is_absolute():
-        raise ValueError(f'filepath_iso must be a relative path, got {filepath_iso}')
+    if not filepath_iso.is_absolute():
+        raise ValueError(f'filepath_iso must be an absolute path, got {filepath_iso}')
     return target_paths[0]
 
 
@@ -352,28 +363,28 @@ def tps_win10_uefi(filepath_iso: PurePosixPath, target_paths: tuple[Path, ...]) 
     Windows 10 or newer ISO image file if this ISO image file is used to create a
     bootable USB drive for a UEFI system.
 
-    Chooses the second target path (NTFS volume) for the `sources` directory except
+    Chooses the second target path (NTFS partition) for the `sources` directory except
     `sources/boot.wim`.
     Chooses the first target path for everything else.
 
     For more information on why we copy the installation files of Windows 10+ images
-    to multiple volumes, refer to the documentation of the ``drive`` package.
+    to multiple partitions, refer to the documentation of the ``drive`` package.
     """
     if len(target_paths) != 2:
         raise ValueError(
             f'Strategy requires exactly 2 target paths, got {target_paths}'
         )
-    if filepath_iso.is_absolute():
-        raise ValueError(f'filepath_iso must be a relative path, got {filepath_iso}')
+    if not filepath_iso.is_absolute():
+        raise ValueError(f'filepath_iso must be an absolute path, got {filepath_iso}')
 
-    parts = filepath_iso.parts
+    parts = filepath_iso.parts[1:]  # strip the '/' part
     part_count = len(parts)
 
     if part_count == 0 or (parts[0] == 'sources' and part_count == 1):
         raise ValueError(f'Got invalid filepath_iso {filepath_iso} for Windows 10+')
 
     # actual logic
-    if filepath_iso.parts[0] == 'sources' and not filepath_iso.parts[1] == 'boot.wim':
+    if parts[0] == 'sources' and not parts[1] == 'boot.wim':
         return target_paths[1]
     return target_paths[0]
 
@@ -396,7 +407,7 @@ class ExtractJob(NamedTuple):
     """Information required for a worker thread to extract a specific file from an
     ISO image file to a local directory.
 
-    filepath_iso: Path of the file to extract, relative to the ISO root directory.
+    filepath_iso: Absolute path of the file to extract from the image.
     filepath_local: Desired path of the file on the local file system.
     """
 
@@ -412,12 +423,10 @@ def _get_facade_for_iso(iso: PyCdlib) -> PyCdlibFacade:
         # prioritize UDF if it's available because it's required for modern
         # Windows ISOs (>= Vista)
         return iso.get_udf_facade()
-
     if iso.has_joliet():
         return iso.get_joliet_facade()
     if iso.has_rock_ridge():
         return iso.get_rock_ridge_facade()
-
     return iso.get_iso9660_facade()
 
 
@@ -487,21 +496,18 @@ def _extract_worker(
                     break
 
                 filepath_iso, filepath_local = job
+                log.debug(f'Extracting {filepath_iso} -> {filepath_local}')
 
                 # create parent directories if necessary
                 dirpath_local = filepath_local.parent
                 dirpath_local.mkdir(parents=True, exist_ok=True)
 
-                # noinspection PyUnresolvedReferences
-                filepath_iso_abs = '/' / filepath_iso
-                log.debug(f'Extracting {filepath_iso_abs} -> {filepath_local}')
-
                 # symlink
-                record = iso_facade.get_record(str(filepath_iso_abs))
+                record = iso_facade.get_record(str(filepath_iso))
                 if record.is_symlink():
                     if not isinstance(iso_facade, PyCdlibRockRidge):
                         log.warning(
-                            f'Skipping non-Rock Ridge symlink at {filepath_iso_abs}'
+                            f'Skipping non-Rock Ridge symlink at {filepath_iso}'
                         )
                         extract_queue.task_done()
                         continue
@@ -510,7 +516,7 @@ def _extract_worker(
                         record.rock_ridge.symlink_path().decode('utf-8')
                     )
                     if symlink_target.is_absolute():
-                        log.warning(f'Skipping absolute symlink at {filepath_iso_abs}')
+                        log.warning(f'Skipping absolute symlink at {filepath_iso}')
                         extract_queue.task_done()
                         continue
 
@@ -521,7 +527,7 @@ def _extract_worker(
 
                 try:
                     # pycdlib doesn't like pathlib paths
-                    file_iso = iso_facade.open_file_from_iso(str(filepath_iso_abs))
+                    file_iso = iso_facade.open_file_from_iso(str(filepath_iso))
                 except PyCdlibInvalidInput as e:
                     # An El Torito boot catalog is also represented by a data file in
                     # an ISO image (e.g. '/isolinux/boot.cat'). If we try to open
@@ -530,10 +536,8 @@ def _extract_worker(
                     # is not handled. As such a file serves no purpose in the file
                     # system itself, we can safely skip its extraction.
                     if str(e) == 'File has no data':
-                        log.debug(
-                            f'Skipping suspected boot catalog at {filepath_iso_abs}'
-                        )
-                        skipped_record = iso_facade.get_record(str(filepath_iso_abs))
+                        log.debug(f'Skipping suspected boot catalog at {filepath_iso}')
+                        skipped_record = iso_facade.get_record(str(filepath_iso))
                         with progress.get_lock():
                             progress.value += skipped_record.get_data_length()
                         extract_queue.task_done()
@@ -596,7 +600,7 @@ def _extract_worker(
 class ExtractProgress(NamedTuple):
     """Information about the extraction progress.
 
-    bytes_total: How many bytes to extract in total (+ overhead).
+    bytes_total: How many bytes to extract in total.
     bytes_done: How many bytes were already extracted.
     seconds_delta: How many seconds passed since the last progress update.
     bytes_delta: How many bytes were extracted since the last progress update.
@@ -743,9 +747,10 @@ def _extract(
             # add jobs to queue
             for dirpath_iso, _, filelist in iso_facade.walk('/'):
 
-                dirpath_iso = PurePosixPath(dirpath_iso).relative_to('/')
-                # dirpath_iso: path to current dir (relative to iso root)
-                # filelist: list of files in current dir
+                dirpath_iso = PurePosixPath(dirpath_iso)
+                dirpath_iso_rel = dirpath_iso.relative_to('/')
+                # dirpath_iso: path to current dir (absolute)
+                # dirpath_iso_rel: path to current dir (relative to ISO root)
 
                 for filename in filelist:
                     filepath_iso = dirpath_iso / filename
@@ -753,11 +758,9 @@ def _extract(
 
                     # strip version number and semicolon from ISO 9660 local file name
                     if isinstance(iso_facade, PyCdlibISO9660):
-                        filename_local = filename.split(';')[0]
-                        filepath_local = rootpath_local / dirpath_iso / filename_local
-                    else:
-                        filepath_local = rootpath_local / filepath_iso
+                        filename = filename.split(';')[0]
 
+                    filepath_local = rootpath_local / dirpath_iso_rel / filename
                     extract_queue.put(ExtractJob(filepath_iso, filepath_local))
 
             bytes_delta_start = progress.value  # measure bytes
