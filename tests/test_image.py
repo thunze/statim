@@ -594,7 +594,7 @@ class TestTps:
 
     @pytest.fixture(scope='class')
     def target_paths(self, request):
-        """Return a ``tuple`` of ``request.param`` distinct ``Path`` objects."""
+        """Return a ``tuple`` of ``<arg>`` distinct ``Path`` objects."""
         return tuple(Path() for _ in range(request.param))
 
     # Tests
@@ -727,7 +727,8 @@ class TestExtractProgress:
 
     def test_seconds_left(self):
         """Test that the ``seconds_left`` property handles zero values and other
-        unexpected values properly."""
+        unexpected values properly.
+        """
         assert ExtractProgress(0, 0, 0, 0).seconds_left is None
         assert ExtractProgress(0, 0, 0, 1).seconds_left is None
         assert ExtractProgress(0, 0, 1, 0).seconds_left is None

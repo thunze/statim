@@ -430,6 +430,123 @@ def _get_facade_for_iso(iso: PyCdlib) -> PyCdlibFacade:
     return iso.get_iso9660_facade()
 
 
+def pause_or_quit(quit_event: Event, resume_event: Event) -> bool:
+    """If ``quit_event`` isn't set, pause as long as ``resume_event`` isn't set.
+
+    Returns whether ``quit_event`` is set.
+    """
+    if not quit_event.is_set():
+        resume_event.wait()
+    return quit_event.is_set()
+
+
+def _extract_file(
+    job: ExtractJob,
+    source_file: BinaryIO,
+    iso_facade: PyCdlibFacade,
+    progress: 'Synchronized[int]',
+    quit_event: Event,
+    resume_event: Event,
+) -> bool:
+    """Extract a specific file from an ISO image.
+
+    :param job: ExtractJob object containing source and destination path.
+    :param source_file: IO handle for the ISO image.
+    :param iso_facade: PyCdlib facade to use to extract the file from the image.
+    :param progress: Value indicating how many bytes were already extracted in total.
+    :param quit_event: Event indicating that the worker is to be stopped.
+    :param resume_event: Event indicating that the worker is not to be paused.
+    """
+    filepath_iso, filepath_local = job
+    log.debug(f'Extracting {filepath_iso} -> {filepath_local}')
+
+    # create parent directories if necessary
+    dirpath_local = filepath_local.parent
+    dirpath_local.mkdir(parents=True, exist_ok=True)
+
+    # symlink handling
+    record = iso_facade.get_record(str(filepath_iso))
+    if record.is_symlink():
+        if not isinstance(iso_facade, PyCdlibRockRidge):
+            log.warning(f'Skipping non-Rock Ridge symlink at {filepath_iso}')
+            return True
+
+        symlink_target = PurePosixPath(record.rock_ridge.symlink_path().decode('utf-8'))
+        if symlink_target.is_absolute():
+            log.warning(f'Skipping absolute symlink at {filepath_iso}')
+            return True
+
+        symlink_target_abs = filepath_local.parent / symlink_target
+        filepath_local.symlink_to(symlink_target_abs)
+        return True
+
+    try:
+        # pycdlib doesn't like pathlib paths
+        file_iso = iso_facade.open_file_from_iso(str(filepath_iso))
+    except PyCdlibInvalidInput as e:
+        # An El Torito boot catalog is also represented by a data file in an ISO
+        # image (e.g. '/isolinux/boot.cat'). If we try to open such a data file using
+        # open_file_from_iso, an exception with the message 'File has no data' is
+        # raised because this edge case is not handled. As such a file serves no
+        # purpose in the file system itself, we can safely skip its extraction.
+        if str(e) == 'File has no data':
+            log.debug(f'Skipping suspected boot catalog at {filepath_iso}')
+            skipped_record = iso_facade.get_record(str(filepath_iso))
+            with progress.get_lock():
+                progress.value += skipped_record.get_data_length()
+            return True
+        else:
+            raise
+
+    # contexts active for the current extraction job
+    with ExitStack() as job_stack:
+        # open_file_from_iso succeeded
+        job_stack.enter_context(file_iso)
+        file_local = job_stack.enter_context(filepath_local.open('wb'))
+        file_bytes_total: int = file_iso.length()
+        file_bytes_left: int = file_bytes_total
+
+        if isinstance(source_file, HttpIO):
+            # use chunked transfer for larger files
+            if file_bytes_total > CHUNK_SIZE_REMOTE_CHUNKED:
+                # noinspection PyTypeChecker
+                job_stack.enter_context(
+                    source_file.chunked_transfer(CHUNK_SIZE_REMOTE_CHUNKED)
+                )
+                chunk_size = CHUNK_SIZE_REMOTE_CHUNKED
+            else:
+                chunk_size = CHUNK_SIZE_REMOTE
+        else:
+            chunk_size = CHUNK_SIZE_LOCAL
+
+        # read and write chunk by chunk
+        while not pause_or_quit(quit_event, resume_event) and file_bytes_left > 0:
+            bytes_expected = min(chunk_size, file_bytes_left)
+            chunk = file_iso.read(bytes_expected)
+            bytes_read = len(chunk)
+            bytes_written = file_local.write(chunk)
+
+            if bytes_read != bytes_expected:
+                raise OSError(
+                    f'Did not read the expected amount of bytes (expected '
+                    f'{bytes_expected} bytes, read {bytes_read} bytes)'
+                )
+            if bytes_written != bytes_read:
+                raise OSError(
+                    f'Did not write the expected amount of bytes (read '
+                    f'{bytes_expected} bytes, wrote {bytes_read} bytes)'
+                )
+            file_bytes_left -= bytes_written
+
+            # sync with other threads
+            with progress.get_lock():
+                progress.value += bytes_written
+
+        return file_bytes_left == 0  # False if pause_or_quit returned True
+
+    assert False  # see https://github.com/python/mypy/issues/7726
+
+
 def _extract_worker(
     source: LocalSource | RemoteSource,
     open_result_queue: Queue[OpenResult],
@@ -454,16 +571,6 @@ def _extract_worker(
     :param quit_event: Event indicating that the worker is to be stopped.
     :param resume_event: Event indicating that the worker is not to be paused.
     """
-
-    def pause_or_quit() -> bool:
-        """If ``quit_event`` isn't set, pause as long as ``resume_event`` isn't set.
-
-        Returns whether ``quit_event`` is set.
-        """
-        if not quit_event.is_set():
-            resume_event.wait()
-        return quit_event.is_set()
-
     try:
         # contexts active for the lifetime of the worker
         with ExitStack() as worker_stack:
@@ -488,110 +595,18 @@ def _extract_worker(
 
             iso_facade = _get_facade_for_iso(iso)
 
-            while not pause_or_quit():
+            while not pause_or_quit(quit_event, resume_event):
                 try:
                     # wait a bit in case there are no jobs in the queue yet
                     job = extract_queue.get(timeout=EXTRACT_QUEUE_TIMEOUT)
                 except Empty:
                     break
 
-                filepath_iso, filepath_local = job
-                log.debug(f'Extracting {filepath_iso} -> {filepath_local}')
-
-                # create parent directories if necessary
-                dirpath_local = filepath_local.parent
-                dirpath_local.mkdir(parents=True, exist_ok=True)
-
-                # symlink
-                record = iso_facade.get_record(str(filepath_iso))
-                if record.is_symlink():
-                    if not isinstance(iso_facade, PyCdlibRockRidge):
-                        log.warning(
-                            f'Skipping non-Rock Ridge symlink at {filepath_iso}'
-                        )
-                        extract_queue.task_done()
-                        continue
-
-                    symlink_target = PurePosixPath(
-                        record.rock_ridge.symlink_path().decode('utf-8')
-                    )
-                    if symlink_target.is_absolute():
-                        log.warning(f'Skipping absolute symlink at {filepath_iso}')
-                        extract_queue.task_done()
-                        continue
-
-                    symlink_target_abs = filepath_local.parent / symlink_target
-                    filepath_local.symlink_to(symlink_target_abs)
+                done = _extract_file(
+                    job, source_file, iso_facade, progress, quit_event, resume_event
+                )
+                if done:
                     extract_queue.task_done()
-                    continue
-
-                try:
-                    # pycdlib doesn't like pathlib paths
-                    file_iso = iso_facade.open_file_from_iso(str(filepath_iso))
-                except PyCdlibInvalidInput as e:
-                    # An El Torito boot catalog is also represented by a data file in
-                    # an ISO image (e.g. '/isolinux/boot.cat'). If we try to open
-                    # such a data file using open_file_from_iso, an exception with
-                    # the message 'File has no data' is raised because this edge case
-                    # is not handled. As such a file serves no purpose in the file
-                    # system itself, we can safely skip its extraction.
-                    if str(e) == 'File has no data':
-                        log.debug(f'Skipping suspected boot catalog at {filepath_iso}')
-                        skipped_record = iso_facade.get_record(str(filepath_iso))
-                        with progress.get_lock():
-                            progress.value += skipped_record.get_data_length()
-                        extract_queue.task_done()
-                        continue
-                    else:
-                        raise
-
-                # open_file_from_iso succeeded
-                # contexts active for the current extraction job
-                with ExitStack() as job_stack:
-                    job_stack.enter_context(file_iso)
-                    file_local = job_stack.enter_context(filepath_local.open('wb'))
-                    file_bytes_total = file_iso.length()
-                    file_bytes_left = file_bytes_total
-
-                    if isinstance(source_file, HttpIO):
-                        # use chunked transfer for larger files
-                        if file_bytes_total > CHUNK_SIZE_REMOTE_CHUNKED:
-                            # noinspection PyTypeChecker
-                            job_stack.enter_context(
-                                source_file.chunked_transfer(CHUNK_SIZE_REMOTE_CHUNKED)
-                            )
-                            chunk_size = CHUNK_SIZE_REMOTE_CHUNKED
-                        else:
-                            chunk_size = CHUNK_SIZE_REMOTE
-                    else:
-                        chunk_size = CHUNK_SIZE_LOCAL
-
-                    # read and write chunk by chunk
-                    while not pause_or_quit() and file_bytes_left > 0:
-                        bytes_expected = min(chunk_size, file_bytes_left)
-                        chunk = file_iso.read(bytes_expected)
-                        bytes_read = len(chunk)
-                        bytes_written = file_local.write(chunk)
-
-                        if bytes_read != bytes_expected:
-                            raise OSError(
-                                f'Did not read the expected amount of bytes (expected '
-                                f'{bytes_expected} bytes, read {bytes_read} bytes)'
-                            )
-                        if bytes_written != bytes_read:
-                            raise OSError(
-                                f'Did not write the expected amount of bytes (read '
-                                f'{bytes_expected} bytes, wrote {bytes_read} bytes)'
-                            )
-
-                        file_bytes_left -= bytes_written
-
-                        # sync with other threads
-                        with progress.get_lock():
-                            progress.value += bytes_written
-
-                    if file_bytes_left == 0:
-                        extract_queue.task_done()
 
     except BaseException as e:
         exc_queue.put(e)
@@ -747,10 +762,8 @@ def _extract(
             # add jobs to queue
             for dirpath_iso, _, filelist in iso_facade.walk('/'):
 
-                dirpath_iso = PurePosixPath(dirpath_iso)
+                dirpath_iso = PurePosixPath(dirpath_iso)  # absolute path to current dir
                 dirpath_iso_rel = dirpath_iso.relative_to('/')
-                # dirpath_iso: path to current dir (absolute)
-                # dirpath_iso_rel: path to current dir (relative to ISO root)
 
                 for filename in filelist:
                     filepath_iso = dirpath_iso / filename
@@ -826,15 +839,14 @@ def _extract(
             for future in as_completed(futures):
                 future.result()
 
-        extract_queue.join()
-        extraction_time = time.perf_counter() - time_extraction_start
+    extract_queue.join()
+    extraction_time = time.perf_counter() - time_extraction_start
 
-        log.info(f'Finished ISO image extraction after {extraction_time:.4f} seconds')
-        if extraction_time > 0:
-            log.info(
-                f'Average extraction speed: {size / extraction_time:.4f} bytes per '
-                f'second'
-            )
+    log.info(f'Finished ISO image extraction after {extraction_time:.4f} seconds')
+    if extraction_time > 0:
+        log.info(
+            f'Average extraction speed: {size / extraction_time:.4f} bytes per second'
+        )
 
 
 @contextmanager
