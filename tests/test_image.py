@@ -1,13 +1,23 @@
 import io
+import re
+from pathlib import Path, PurePosixPath
 from random import randbytes
 
 import pytest
+from pycdlib import PyCdlib
+from pycdlib.facade import PyCdlibISO9660, PyCdlibJoliet, PyCdlibRockRidge, PyCdlibUDF
 from requests import Request
 from requests.exceptions import HTTPError
 from requests_mock import Mocker
 
 # noinspection PyProtectedMember
-from statim.image import HttpIO
+from statim.image import (
+    ExtractProgress,
+    HttpIO,
+    _get_facade_for_iso,
+    tps_default,
+    tps_win10_uefi,
+)
 
 
 class TestHttpIO:
@@ -572,3 +582,156 @@ class TestHttpIO:
             pass
         with pytest.raises(StopIteration):
             next(chunks)
+
+
+# --- Target path strategies
+
+
+class TestTps:
+    """Tests for target path strategies."""
+
+    # Fixtures
+
+    @pytest.fixture(scope='class')
+    def target_paths(self, request):
+        """Return a ``tuple`` of ``request.param`` distinct ``Path`` objects."""
+        return tuple(Path() for _ in range(request.param))
+
+    # Tests
+
+    @pytest.mark.parametrize(
+        ['target_path_strategy', 'target_paths'],
+        [(tps_default, 1), (tps_win10_uefi, 2)],
+        indirect=['target_paths'],
+    )
+    def test_tps_fail_absolute(
+        self, target_path_strategy, target_paths: tuple[Path, ...]
+    ):
+        """Test that all target path strategies raise ``ValueError`` if a relative
+        path is passed as a value for ``filepath_iso``.
+        """
+        with pytest.raises(
+            ValueError, match='filepath_iso must be an absolute path, got thing'
+        ):
+            target_path_strategy(PurePosixPath('thing'), target_paths)
+
+    @pytest.mark.parametrize('target_paths', range(1, 4), indirect=True)
+    def test_tps_default_success(self, target_paths: tuple[Path, ...]):
+        """Test that the default target path strategy always returns the first target
+        path of the target paths passed.
+        """
+        filepath_iso = PurePosixPath('/thing')
+        assert tps_default(filepath_iso, target_paths) is target_paths[0]
+
+    def test_tps_default_fail(self):
+        """Test that the default target path strategy raises ``ValueError`` if less
+        than one target path is passed.
+        """
+        with pytest.raises(
+            ValueError, match='Strategy requires at least 1 target path, got ()'
+        ):
+            tps_default(PurePosixPath('/thing'), ())
+
+    @pytest.mark.parametrize('target_paths', [2], indirect=['target_paths'])
+    def test_tps_win10_uefi_success(self, target_paths: tuple[Path, ...]):
+        """Test that the target path strategy ``tps_win10_uefi`` returns the correct
+        target path of the target paths passed.
+        """
+        tp = target_paths
+        assert tps_win10_uefi(PurePosixPath('/thing'), tp) is tp[0]
+        assert tps_win10_uefi(PurePosixPath('/nested/thing'), tp) is tp[0]
+        assert tps_win10_uefi(PurePosixPath('/nested/boot.wim'), tp) is tp[0]
+        assert tps_win10_uefi(PurePosixPath('/sources/boot.wim'), tp) is tp[0]
+        assert tps_win10_uefi(PurePosixPath('/sources/thing'), tp) is tp[1]
+
+    @pytest.mark.parametrize('target_paths', [0, 1, 3], indirect=True)
+    def test_tps_win10_uefi_fail_target_paths(self, target_paths: tuple[Path, ...]):
+        """Test that the target path strategy ``tps_win10_uefi`` raises ``ValueError``
+        if less or more than 2 target paths are passed.
+        """
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                f'Strategy requires exactly 2 target paths, got {target_paths}'
+            ),
+        ):
+            tps_win10_uefi(PurePosixPath('/thing'), target_paths)
+
+    @pytest.mark.parametrize(
+        ['filepath_iso', 'target_paths'],
+        [(PurePosixPath('/'), 2), (PurePosixPath('/sources'), 2)],
+        indirect=['target_paths'],
+    )
+    def test_tps_win10_uefi_fail_filepath_iso(
+        self, filepath_iso: PurePosixPath, target_paths: tuple[Path, ...]
+    ):
+        """Test that the target path strategy ``tps_win10_uefi`` raises ``ValueError``
+        if certain values for ``filepath_iso`` are passed which are invalid for
+        Windows 10+ images.
+        """
+        with pytest.raises(
+            ValueError, match=f'Got invalid filepath_iso {filepath_iso} for Windows 10+'
+        ):
+            tps_win10_uefi(filepath_iso, target_paths)
+
+
+@pytest.mark.parametrize('joliet', [None, 3])
+@pytest.mark.parametrize('rock_ridge', [None, '1.09'])
+@pytest.mark.parametrize('udf', [None, '2.60'])
+def test__get_facade_for_iso(joliet, rock_ridge, udf):
+    """Test that ``_get_facade_for_iso`` returns the most preferable of the available
+    facades of a ``PyCdlib`` object.
+    """
+    iso = PyCdlib()
+    iso.new(joliet=joliet, rock_ridge=rock_ridge, udf=udf)
+    facade = _get_facade_for_iso(iso)
+
+    if udf:
+        assert type(facade) == PyCdlibUDF
+    elif joliet:
+        assert type(facade) == PyCdlibJoliet
+    elif rock_ridge:
+        assert type(facade) == PyCdlibRockRidge
+    else:
+        assert type(facade) == PyCdlibISO9660
+
+
+class TestExtractProgress:
+    """Tests for the named tuple ``ExtractProgress`` and its properties which require
+    calculations.
+    """
+
+    def test_done_ratio(self):
+        """Test that the ``done_ratio`` property handles zero values and other
+        unexpected values properly.
+        """
+        assert ExtractProgress(-1, 0, 0, 0).done_ratio == 1
+        assert ExtractProgress(0, 0, 0, 0).done_ratio == 1
+        assert ExtractProgress(0, 1, 0, 0).done_ratio == 1
+        assert ExtractProgress(1, 0, 0, 0).done_ratio == 0
+        assert ExtractProgress(1, 1, 0, 0).done_ratio == 1
+        assert ExtractProgress(8, 2, 0, 0).done_ratio == 0.25
+
+    def test_bytes_per_second(self):
+        """Test that the ``bytes_per_second`` property handles zero values and other
+        unexpected values properly.
+        """
+        assert ExtractProgress(0, 0, -1, 0).bytes_per_second is None
+        assert ExtractProgress(0, 0, 0, 0).bytes_per_second is None
+        assert ExtractProgress(0, 0, 0, 1).bytes_per_second is None
+        assert ExtractProgress(0, 0, 1, 0).bytes_per_second == 0
+        assert ExtractProgress(0, 0, 1, 1).bytes_per_second == 1
+        assert ExtractProgress(0, 0, 2, 8).bytes_per_second == 4
+        assert ExtractProgress(0, 0, 2, -8).bytes_per_second == -4
+        assert ExtractProgress(0, 0, float('inf'), 1).bytes_per_second == 0
+
+    def test_seconds_left(self):
+        """Test that the ``seconds_left`` property handles zero values and other
+        unexpected values properly."""
+        assert ExtractProgress(0, 0, 0, 0).seconds_left is None
+        assert ExtractProgress(0, 0, 0, 1).seconds_left is None
+        assert ExtractProgress(0, 0, 1, 0).seconds_left is None
+        assert ExtractProgress(0, 0, 1, 1).seconds_left == 0
+        assert ExtractProgress(1, 0, 1, 1).seconds_left == 1
+        assert ExtractProgress(1, 1, 1, 1).seconds_left == 0
+        assert ExtractProgress(1, 1, 1, -1).seconds_left is None
