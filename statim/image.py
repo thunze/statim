@@ -468,17 +468,11 @@ def _extract_file(
     # symlink handling
     record = iso_facade.get_record(str(filepath_iso))
     if record.is_symlink():
-        if not isinstance(iso_facade, PyCdlibRockRidge):
+        if isinstance(iso_facade, PyCdlibRockRidge):
+            symlink_target = record.rock_ridge.symlink_path().decode('utf-8')
+            filepath_local.symlink_to(symlink_target)
+        else:
             log.warning(f'Skipping non-Rock Ridge symlink at {filepath_iso}')
-            return True
-
-        symlink_target = PurePosixPath(record.rock_ridge.symlink_path().decode('utf-8'))
-        if symlink_target.is_absolute():
-            log.warning(f'Skipping absolute symlink at {filepath_iso}')
-            return True
-
-        symlink_target_abs = filepath_local.parent / symlink_target
-        filepath_local.symlink_to(symlink_target_abs)
         return True
 
     try:
