@@ -1357,17 +1357,18 @@ def test_extract_fail_target_paths(iso_typical, source_from_iso, remote, tempdir
     source = source_from_iso(iso, remote)
     iso.close()
 
-    target_paths_list = [
-        tempdir / 'notadirectory',
-        (tempdir / 'notadirectory', tempdir),
-        (tempdir, tempdir / 'notadirectory'),
-    ]
     not_a_directory = tempdir / 'notadirectory'
+    target_paths_list = [
+        not_a_directory,
+        (not_a_directory, tempdir),
+        (tempdir, not_a_directory),
+    ]
 
     for target_paths in target_paths_list:
         # skipcq: PTC-W0062
         with pytest.raises(
-            ValueError, match=re.escape(f'{not_a_directory} is not a directory')
+            ValueError,
+            match=re.escape(f'{not_a_directory.resolve()} is not a directory'),
         ):
             with extract(source, target_paths) as extraction:
                 next(extraction)
