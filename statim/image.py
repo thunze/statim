@@ -52,7 +52,7 @@ TARGET_PATHS_EXTRA_FREE_SPACE = 1 * _MIB  # safety buffer for additional files
 
 MAX_WORKERS_LOCAL = 1
 MAX_WORKERS_REMOTE = 16
-EXTRACT_QUEUE_TIMEOUT = 0.5  # seconds
+EXTRACT_QUEUE_TIMEOUT = 0.05  # seconds
 EXC_QUEUE_TIMEOUT = 0.05  # seconds
 PAUSE_TIMEOUT = 0.05  # seconds
 
@@ -547,6 +547,7 @@ def _extract_worker(
     extract_queue: Queue[ExtractJob],
     exc_queue: Queue[BaseException],
     progress: 'Synchronized[int]',  # multiprocessing.Value
+    extract_queue_ready: Event,
     quit_event: Event,
     resume_event: Event,
 ) -> None:
@@ -562,6 +563,7 @@ def _extract_worker(
 
     :param exc_queue: Queue of exceptions which were raised by this function.
     :param progress: Value indicating how many bytes were already extracted in total.
+    :param extract_queue_ready: Event indicating that all extraction jobs were enqueued.
     :param quit_event: Event indicating that the worker is to be stopped.
     :param resume_event: Event indicating that the worker is not to be paused.
     """
@@ -591,10 +593,12 @@ def _extract_worker(
 
             while not _pause_or_quit(quit_event, resume_event):
                 try:
-                    # wait a bit in case there are no jobs in the queue yet
                     job = extract_queue.get(timeout=EXTRACT_QUEUE_TIMEOUT)
                 except Empty:
-                    break
+                    # wait until all jobs are enqueued
+                    if not extract_queue_ready.is_set():
+                        continue
+                    break  # no jobs left
 
                 task_done = _extract_file(
                     job, source_file, iso_facade, progress, quit_event, resume_event
@@ -682,81 +686,85 @@ def _extract(
         extract_queue: Queue[ExtractJob] = Queue()
         exc_queue: Queue[BaseException] = Queue()
         progress: 'Synchronized[int]' = Value('q', 0)  # zero bytes processed yet
+        extract_queue_ready = Event()
         quit_event = Event()
         resume_event = Event()
         resume_event.set()
-
-        # open IO handles separately to avoid side effects in extraction workers
         futures = []
-        for _ in range(max_workers):
-            future = executor.submit(
-                _extract_worker,
-                source,
-                open_result_queue,
-                extract_queue,
-                exc_queue,
-                progress,
-                quit_event,
-                resume_event,
-            )
-            futures.append(future)
-
-        # get first open IO handle and PyCdlib object
-        while True:
-            try:
-                source_file, iso = open_result_queue.get(block=False)
-                break
-            except Empty:
-                # open_result_queue stays empty forever if an exception is raised in
-                # every worker thread before enqueuing a result
-                try:
-                    exc = exc_queue.get(timeout=EXC_QUEUE_TIMEOUT)
-                except Empty:
-                    continue
-                else:
-                    raise RuntimeError('Exception raised in worker thread') from exc
-
-        log.debug(f'Opened ISO after {(time.perf_counter() - time_start):.4f} seconds')
-
-        # select ISO extension
-        iso_facade = _get_facade_for_iso(iso)
-        iso_format_str = iso_facade.__class__.__name__.strip('PyCdlib')
-        log.debug(f'Selected ISO format {iso_format_str!r}')
-
-        if isinstance(iso_facade, PyCdlibISO9660):
-            log.warning('Fallback to pure ISO 9660 format')
-
-        # size checks
-        size = 0  # ISO contents
-        for dirpath_iso, _, filelist in iso_facade.walk('/'):
-            for filename in filelist:
-                filepath_iso_abs = PurePosixPath(dirpath_iso) / filename
-                # pycdlib doesn't like pathlib paths
-                record = iso_facade.get_record(str(filepath_iso_abs))
-                if not record.is_symlink():
-                    size += record.get_data_length()
-
-        size_container = source_file.seek(0, 2)  # ISO file
-        source_file.seek(0, 0)
-
-        log.debug(f'ISO size: {size_container} bytes')
-        log.debug(f'ISO size (contents): {size} bytes')
-
-        space_available = sum(disk_usage(path).free for path in target_paths)
-        log.debug(
-            f'Total space available at target directories: {space_available} bytes'
-        )
-        if space_available < size + TARGET_PATHS_EXTRA_FREE_SPACE:
-            raise ValueError('Not enough disk space available at target directories')
-
-        # actual extraction
-        time_extraction_start = time.perf_counter()
-        log.info('Extracting files from ISO image ...')
 
         try:
+            # open IO handles separately to avoid side effects in extraction workers
+            for _ in range(max_workers):
+                future = executor.submit(
+                    _extract_worker,
+                    source,
+                    open_result_queue,
+                    extract_queue,
+                    exc_queue,
+                    progress,
+                    extract_queue_ready,
+                    quit_event,
+                    resume_event,
+                )
+                futures.append(future)
+
+            # get first open IO handle and PyCdlib object
+            while True:
+                try:
+                    source_file, iso = open_result_queue.get(block=False)
+                    break
+                except Empty:
+                    # open_result_queue stays empty forever if an exception is raised
+                    # in every worker thread before enqueuing a result
+                    try:
+                        exc = exc_queue.get(timeout=EXC_QUEUE_TIMEOUT)
+                    except Empty:
+                        continue
+                    else:
+                        raise RuntimeError('Exception raised in worker thread') from exc
+
+            open_time = time.perf_counter() - time_start
+            log.debug(f'Opened ISO after {open_time:.4f} seconds')
+
+            # select ISO extension
+            iso_facade = _get_facade_for_iso(iso)
+            iso_format_str = iso_facade.__class__.__name__.strip('PyCdlib')
+            log.debug(f'Selected ISO format {iso_format_str!r}')
+
+            if isinstance(iso_facade, PyCdlibISO9660):
+                log.warning('Fallback to pure ISO 9660 format')
+
+            # size checks
+            size = 0  # ISO contents
+            for dirpath_iso, _, filelist in iso_facade.walk('/'):
+                for filename in filelist:
+                    filepath_iso_abs = PurePosixPath(dirpath_iso) / filename
+                    # pycdlib doesn't like pathlib paths
+                    record = iso_facade.get_record(str(filepath_iso_abs))
+                    if not record.is_symlink():
+                        size += record.get_data_length()
+
+            size_container = source_file.seek(0, 2)  # ISO file
+            source_file.seek(0, 0)
+
+            log.debug(f'ISO size: {size_container} bytes')
+            log.debug(f'ISO size (contents): {size} bytes')
+
+            space_available = sum(disk_usage(path).free for path in target_paths)
+            log.debug(
+                f'Total space available at target directories: {space_available} bytes'
+            )
+            if space_available < size + TARGET_PATHS_EXTRA_FREE_SPACE:
+                raise ValueError(
+                    'Not enough disk space available at target directories'
+                )
+
+            # actual extraction
+            time_extraction_start = time.perf_counter()
+            log.info('Extracting files from ISO image ...')
+
             # add jobs to queue
             for dirpath_iso, _, filelist in iso_facade.walk('/'):
-
                 dirpath_iso = PurePosixPath(dirpath_iso)  # absolute path to current dir
                 dirpath_iso_rel = dirpath_iso.relative_to('/')
 
@@ -771,6 +779,7 @@ def _extract(
                     filepath_local = rootpath_local / dirpath_iso_rel / filename
                     extract_queue.put(ExtractJob(filepath_iso, filepath_local))
 
+            extract_queue_ready.set()
             bytes_delta_start = progress.value  # measure bytes
             seconds_delta_start = time.perf_counter()  # measure time
 
@@ -825,8 +834,8 @@ def _extract(
 
         finally:
             # Any unhandled exception raised during extraction wouldn't take effect if
-            # the worker threads stayed busy with jobs: They wouldn't quit until
-            # extract_queue is empty.
+            # the worker threads stayed busy with jobs or with waiting for
+            # extract_queue_ready.
             log.info('Waiting for all workers to quit ...')
             quit_event.set()
             resume_event.set()  # order is important here!
