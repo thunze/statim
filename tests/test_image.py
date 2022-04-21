@@ -945,10 +945,13 @@ def test__extract_file_typical(
 
         for filepath_iso_str, data in files:
             filepath_iso = PurePosixPath(filepath_iso_str)
-            filepath_local = tempdir / filepath_iso.relative_to('/')
+            filepath_local_tail = filepath_iso
 
             if not any((rock_ridge, joliet, udf)):  # pure ISO 9660
                 filepath_iso = PurePosixPath(filepath_iso_str.upper() + ';1')
+                filepath_local_tail = PurePosixPath(filepath_iso_str.upper())
+
+            filepath_local = tempdir / filepath_local_tail.relative_to('/')
 
             done = _extract_file(
                 ExtractJob(filepath_iso, filepath_local),
