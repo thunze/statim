@@ -52,7 +52,7 @@ TARGET_PATHS_EXTRA_FREE_SPACE = 1 * _MIB  # safety buffer for additional files
 
 MAX_WORKERS_LOCAL = 1
 MAX_WORKERS_REMOTE = 16
-EXTRACT_QUEUE_TIMEOUT = 1  # seconds
+EXTRACT_QUEUE_TIMEOUT = 0.5  # seconds
 EXC_QUEUE_TIMEOUT = 0.05  # seconds
 PAUSE_TIMEOUT = 0.05  # seconds
 
@@ -746,7 +746,7 @@ def _extract(
         log.debug(
             f'Total space available at target directories: {space_available} bytes'
         )
-        if space_available + TARGET_PATHS_EXTRA_FREE_SPACE < size:
+        if space_available < size + TARGET_PATHS_EXTRA_FREE_SPACE:
             raise ValueError('Not enough disk space available at target directories')
 
         # actual extraction
