@@ -430,8 +430,8 @@ def _get_facade_for_iso(iso: PyCdlib) -> PyCdlibFacade:
     return iso.get_iso9660_facade()
 
 
-def pause_or_quit(quit_event: Event, resume_event: Event) -> bool:
-    """If ``quit_event`` isn't set, pause as long as ``resume_event`` isn't set.
+def _pause_or_quit(quit_event: Event, resume_event: Event) -> bool:
+    """If ``quit_event`` isn't set, wait as long as ``resume_event`` isn't set.
 
     Returns whether ``quit_event`` is set.
     """
@@ -444,7 +444,7 @@ def _extract_file(
     job: ExtractJob,
     source_file: BinaryIO,
     iso_facade: PyCdlibFacade,
-    progress: 'Synchronized[int]',
+    progress: 'Synchronized[int]',  # multiprocessing.Value
     quit_event: Event,
     resume_event: Event,
 ) -> bool:
@@ -456,6 +456,7 @@ def _extract_file(
     :param progress: Value indicating how many bytes were already extracted in total.
     :param quit_event: Event indicating that the worker is to be stopped.
     :param resume_event: Event indicating that the worker is not to be paused.
+    :returns: True if the according extraction job can be marked as done.
     """
     filepath_iso, filepath_local = job
     log.debug(f'Extracting {filepath_iso} -> {filepath_local}')
@@ -481,7 +482,6 @@ def _extract_file(
         return True
 
     try:
-        # pycdlib doesn't like pathlib paths
         file_iso = iso_facade.open_file_from_iso(str(filepath_iso))
     except PyCdlibInvalidInput as e:
         # An El Torito boot catalog is also represented by a data file in an ISO
@@ -520,18 +520,18 @@ def _extract_file(
             chunk_size = CHUNK_SIZE_LOCAL
 
         # read and write chunk by chunk
-        while not pause_or_quit(quit_event, resume_event) and file_bytes_left > 0:
+        while not _pause_or_quit(quit_event, resume_event) and file_bytes_left > 0:
             bytes_expected = min(chunk_size, file_bytes_left)
             chunk = file_iso.read(bytes_expected)
             bytes_read = len(chunk)
             bytes_written = file_local.write(chunk)
 
-            if bytes_read != bytes_expected:
+            if bytes_read != bytes_expected:  # pragma: no cover
                 raise OSError(
                     f'Did not read the expected amount of bytes (expected '
                     f'{bytes_expected} bytes, read {bytes_read} bytes)'
                 )
-            if bytes_written != bytes_read:
+            if bytes_written != bytes_read:  # pragma: no cover
                 raise OSError(
                     f'Did not write the expected amount of bytes (read '
                     f'{bytes_expected} bytes, wrote {bytes_read} bytes)'
@@ -542,7 +542,7 @@ def _extract_file(
             with progress.get_lock():
                 progress.value += bytes_written
 
-        return file_bytes_left == 0  # False if pause_or_quit returned True
+        return file_bytes_left == 0  # False if _pause_or_quit returned True
 
     assert False  # see https://github.com/python/mypy/issues/7726
 
@@ -595,17 +595,17 @@ def _extract_worker(
 
             iso_facade = _get_facade_for_iso(iso)
 
-            while not pause_or_quit(quit_event, resume_event):
+            while not _pause_or_quit(quit_event, resume_event):
                 try:
                     # wait a bit in case there are no jobs in the queue yet
                     job = extract_queue.get(timeout=EXTRACT_QUEUE_TIMEOUT)
                 except Empty:
                     break
 
-                done = _extract_file(
+                task_done = _extract_file(
                     job, source_file, iso_facade, progress, quit_event, resume_event
                 )
-                if done:
+                if task_done:
                     extract_queue.task_done()
 
     except BaseException as e:
@@ -737,6 +737,7 @@ def _extract(
         for dirpath_iso, _, filelist in iso_facade.walk('/'):
             for filename in filelist:
                 filepath_iso_abs = PurePosixPath(dirpath_iso) / filename
+                # pycdlib doesn't like pathlib paths
                 record = iso_facade.get_record(str(filepath_iso_abs))
                 if not record.is_symlink():
                     size += record.get_data_length()
@@ -815,7 +816,7 @@ def _extract(
                     seconds_delta_start += time.perf_counter() - pause_start
                     resume_event.set()
 
-            if progress.value != size:
+            if progress.value != size:  # pragma: no cover
                 log.warning(
                     f'Size of extracted files does not match calculated size '
                     f'(expected {size} bytes, got {progress.value} bytes)'
