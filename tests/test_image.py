@@ -1198,7 +1198,7 @@ def test_iso_size_contents(iso_typical, rock_ridge, joliet, udf, io_from_iso, re
     contents.
     """
     # prepare ISO
-    iso, directories, files = iso_typical(rock_ridge=rock_ridge, joliet=joliet, udf=udf)
+    iso, _, files = iso_typical(rock_ridge=rock_ridge, joliet=joliet, udf=udf)
     iso_facade = _get_facade_for_iso(iso)
     size_expected = sum(len(file[1]) for file in files)
 
@@ -1207,8 +1207,7 @@ def test_iso_size_contents(iso_typical, rock_ridge, joliet, udf, io_from_iso, re
     size_expected += 2048
 
     # symlinks shouldn't add to the total size
-    if isinstance(iso_facade, PyCdlibRockRidge) or isinstance(iso_facade, PyCdlibUDF):
-
+    if isinstance(iso_facade, (PyCdlibRockRidge, PyCdlibUDF)):
         symlink_target_abs = PurePosixPath(files[1][0])
         symlink_target_1 = symlink_target_abs.relative_to('/')
         symlink_target_2 = symlink_target_abs.relative_to('/dir1')
