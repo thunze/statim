@@ -1,4 +1,4 @@
-"""Extraction of ISO image files available on the local file system or via HTTP."""
+"""Extraction of ISO image files available on a local file system or via HTTP."""
 
 import logging
 import time
@@ -408,7 +408,7 @@ class ExtractJob(NamedTuple):
     ISO image file to a local directory.
 
     filepath_iso: Absolute path of the file to extract from the image.
-    filepath_local: Desired path of the file on the local file system.
+    filepath_local: Desired path of the file on a local file system.
     """
 
     filepath_iso: PurePosixPath
@@ -538,7 +538,7 @@ def _extract_file(
 
         return file_bytes_left == 0  # False if _pause_or_quit returned True
 
-    assert False  # see https://github.com/python/mypy/issues/7726
+    assert False  # see https://github.com/python/mypy/issues/7726, skipcq: BAN-B101
 
 
 def _extract_worker(
