@@ -2,7 +2,7 @@
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, closing, contextmanager
 from io import SEEK_CUR, SEEK_END, SEEK_SET, IOBase, UnsupportedOperation
 from multiprocessing import Value
@@ -561,7 +561,7 @@ def _extract_worker(
     this function) can execute these "extraction jobs" by extracting the according
     files.
 
-    :param exc_queue: Queue of exceptions which were raised by this function.
+    :param exc_queue: Queue of exceptions raised by workers.
     :param progress: Value indicating how many bytes were already extracted in total.
     :param extract_queue_ready: Event indicating that all extraction jobs were enqueued.
     :param quit_event: Event indicating that the worker is to be stopped.
@@ -653,6 +653,122 @@ class ExtractProgress(NamedTuple):
         return (self.bytes_total - self.bytes_done) / self.bytes_per_second
 
 
+def iso_size_contents(iso_facade: PyCdlibFacade) -> int:
+    """Return the size of the ISO image contents which are visible to ``iso_facade``
+    in bytes.
+    """
+    size = 0
+    for dirpath_iso, _, filelist in iso_facade.walk('/'):
+        for filename in filelist:
+            filepath_iso_abs = PurePosixPath(dirpath_iso) / filename
+            # pycdlib doesn't like pathlib paths
+            record = iso_facade.get_record(str(filepath_iso_abs))
+            if not record.is_symlink():
+                size += record.get_data_length()
+    return size
+
+
+def _enqueue_jobs(
+    iso_facade: PyCdlibFacade,
+    extract_queue: Queue[ExtractJob],
+    target_paths: tuple[Path, ...],
+    target_path_strategy: Callable[[PurePosixPath, tuple[Path, ...]], Path],
+) -> None:
+    """Iterate over every file visible to ``iso_facade`` and add according
+    ``ExtractJob`` objects to ``extract_queue``.
+
+    The local file paths planned for the files to extract are determined by
+    ``target_path_strategy``.
+    """
+    for dirpath_iso, _, filelist in iso_facade.walk('/'):
+        dirpath_iso = PurePosixPath(dirpath_iso)  # absolute path to current dir
+        dirpath_iso_rel = dirpath_iso.relative_to('/')
+
+        for filename in filelist:
+            filepath_iso = dirpath_iso / filename
+            rootpath_local = target_path_strategy(filepath_iso, target_paths)
+
+            # strip version number and semicolon from ISO 9660 local file name
+            if isinstance(iso_facade, PyCdlibISO9660):
+                filename_local = filename.split(';')[0]
+            else:
+                filename_local = filename
+
+            filepath_local = rootpath_local / dirpath_iso_rel / filename_local
+            extract_queue.put(ExtractJob(filepath_iso, filepath_local))
+
+
+def _report_progress(
+    futures: list[Future[None]],
+    size: int,
+    exc_queue: Queue[BaseException],
+    progress: 'Synchronized[int]',  # multiprocessing.Value
+    resume_event: Event,
+) -> Generator[Optional[ExtractProgress], Optional[bool], None]:
+    """Wait for all workers described by ``futures`` to finish and regularly yield
+    progress updates regarding the extraction in the form of ``ExtractProgress``
+    objects.
+
+    If exceptions raised in worker threads are encountered via ``exc_queue``, they
+    are re-raised.
+
+    :param size: Size of ISO image contents to extract in total.
+    :param exc_queue: Queue of exceptions raised by workers.
+    :param progress: Value indicating how many bytes were already extracted in total.
+    :param resume_event: Event indicating that the workers are not to be paused.
+    """
+    bytes_delta_start = progress.value  # measure bytes
+    seconds_delta_start = time.perf_counter()  # measure time
+
+    # wait for all worker threads to finish
+    while not all(future.done() for future in futures):
+        try:
+            exc = exc_queue.get(timeout=EXC_QUEUE_TIMEOUT)
+        except Empty:
+            pass
+        else:
+            raise RuntimeError('Exception raised in worker thread') from exc
+
+        extract_progress = None
+        seconds_delta_end = time.perf_counter()
+        seconds_delta = seconds_delta_end - seconds_delta_start
+
+        # send a progress update at most every PROGRESS_UPDATE_MIN_GAP seconds
+        if seconds_delta >= PROGRESS_UPDATE_MIN_GAP:
+            bytes_delta_end = progress.value
+            bytes_delta = bytes_delta_end - bytes_delta_start
+
+            # only send an actual ExtractProgress (and not None) if at least one
+            # byte was extracted or if it's enforced by PROGRESS_UPDATE_MAX_GAP
+            if bytes_delta > 0 or seconds_delta >= PROGRESS_UPDATE_MAX_GAP:
+                extract_progress = ExtractProgress(
+                    size, bytes_delta_end, seconds_delta, bytes_delta
+                )
+                seconds_delta_start = seconds_delta_end
+                bytes_delta_start = bytes_delta_end
+
+        should_pause = yield extract_progress
+        if should_pause:
+            resume_event.clear()
+            pause_start = time.perf_counter()
+            while (yield None):
+                time.sleep(PAUSE_TIMEOUT)
+            seconds_delta_start += time.perf_counter() - pause_start
+            resume_event.set()
+
+    if progress.value != size:  # pragma: no cover
+        log.warning(
+            f'Size of extracted files does not match calculated size '
+            f'(expected {size} bytes, got {progress.value} bytes)'
+        )
+
+    # last progress update
+    progress.value = size
+    seconds_delta = time.perf_counter() - seconds_delta_start
+    bytes_delta = size - bytes_delta_start
+    yield ExtractProgress(size, size, seconds_delta, bytes_delta)
+
+
 def _extract(
     source: LocalSource | RemoteSource,
     target_paths: Path | tuple[Path, ...],
@@ -735,18 +851,9 @@ def _extract(
                 log.warning('Fallback to pure ISO 9660 format')
 
             # size checks
-            size = 0  # ISO contents
-            for dirpath_iso, _, filelist in iso_facade.walk('/'):
-                for filename in filelist:
-                    filepath_iso_abs = PurePosixPath(dirpath_iso) / filename
-                    # pycdlib doesn't like pathlib paths
-                    record = iso_facade.get_record(str(filepath_iso_abs))
-                    if not record.is_symlink():
-                        size += record.get_data_length()
-
+            size = iso_size_contents(iso_facade)  # ISO contents
             size_container = source_file.seek(0, 2)  # ISO file
             source_file.seek(0, 0)
-
             log.debug(f'ISO size: {size_container} bytes')
             log.debug(f'ISO size (contents): {size} bytes')
 
@@ -759,77 +866,17 @@ def _extract(
                     'Not enough disk space available at target directories'
                 )
 
-            # actual extraction
-            time_extraction_start = time.perf_counter()
+            # add extraction jobs to queue
+            _enqueue_jobs(iso_facade, extract_queue, target_paths, target_path_strategy)
+
+            # start extraction
             log.info('Extracting files from ISO image ...')
-
-            # add jobs to queue
-            for dirpath_iso, _, filelist in iso_facade.walk('/'):
-                dirpath_iso = PurePosixPath(dirpath_iso)  # absolute path to current dir
-                dirpath_iso_rel = dirpath_iso.relative_to('/')
-
-                for filename in filelist:
-                    filepath_iso = dirpath_iso / filename
-                    rootpath_local = target_path_strategy(filepath_iso, target_paths)
-
-                    # strip version number and semicolon from ISO 9660 local file name
-                    if isinstance(iso_facade, PyCdlibISO9660):
-                        filename = filename.split(';')[0]
-
-                    filepath_local = rootpath_local / dirpath_iso_rel / filename
-                    extract_queue.put(ExtractJob(filepath_iso, filepath_local))
-
+            time_extraction_start = time.perf_counter()
             extract_queue_ready.set()
-            bytes_delta_start = progress.value  # measure bytes
-            seconds_delta_start = time.perf_counter()  # measure time
 
-            # wait for all worker threads to finish
-            while not all(future.done() for future in futures):
-                try:
-                    exc = exc_queue.get(timeout=EXC_QUEUE_TIMEOUT)
-                except Empty:
-                    pass
-                else:
-                    raise RuntimeError('Exception raised in worker thread') from exc
-
-                extract_progress = None
-                seconds_delta_end = time.perf_counter()
-                seconds_delta = seconds_delta_end - seconds_delta_start
-
-                # send a progress update at most every PROGRESS_UPDATE_MIN_GAP seconds
-                if seconds_delta >= PROGRESS_UPDATE_MIN_GAP:
-                    bytes_delta_end = progress.value
-                    bytes_delta = bytes_delta_end - bytes_delta_start
-
-                    # only send an actual ExtractProgress (and not None) if at least one
-                    # byte was extracted or if it's enforced by PROGRESS_UPDATE_MAX_GAP
-                    if bytes_delta > 0 or seconds_delta >= PROGRESS_UPDATE_MAX_GAP:
-                        extract_progress = ExtractProgress(
-                            size, bytes_delta_end, seconds_delta, bytes_delta
-                        )
-                        seconds_delta_start = seconds_delta_end
-                        bytes_delta_start = bytes_delta_end
-
-                should_pause = yield extract_progress
-                if should_pause:
-                    resume_event.clear()
-                    pause_start = time.perf_counter()
-                    while (yield None):
-                        time.sleep(PAUSE_TIMEOUT)
-                    seconds_delta_start += time.perf_counter() - pause_start
-                    resume_event.set()
-
-            if progress.value != size:  # pragma: no cover
-                log.warning(
-                    f'Size of extracted files does not match calculated size '
-                    f'(expected {size} bytes, got {progress.value} bytes)'
-                )
-
-            # last progress update
-            progress.value = size
-            seconds_delta = time.perf_counter() - seconds_delta_start
-            bytes_delta = size - bytes_delta_start
-            yield ExtractProgress(size, size, seconds_delta, bytes_delta)
+            yield from _report_progress(
+                futures, size, exc_queue, progress, resume_event
+            )
             wait(futures)
 
         finally:

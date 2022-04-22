@@ -31,6 +31,7 @@ from statim.image import (
     _get_facade_for_iso,
     _pause_or_quit,
     extract,
+    iso_size_contents,
     tps_default,
     tps_win10_uefi,
 )
@@ -1060,7 +1061,7 @@ def test__extract_file_symlink(iso_new_args, io_from_iso, remote, tempdir):
 
 
 @pytest.mark.parametrize(
-    'iso_new_args', [{}, {'joliet': 3}, {'rock_ridge': '1.09'}, {'udf': '2.60'}]
+    'iso_new_args', [{}, {'rock_ridge': '1.09'}, {'joliet': 3}, {'udf': '2.60'}]
 )
 @pytest.mark.parametrize('remote', [False, True])
 def test__extract_file_el_torito(iso_new_args, io_from_iso, remote, tempdir):
@@ -1080,9 +1081,9 @@ def test__extract_file_el_torito(iso_new_args, io_from_iso, remote, tempdir):
 
     # boot file must be visible on pure ISO 9660
     if isinstance(iso_facade, PyCdlibRockRidge):
-        iso.add_fp(BytesIO(b'duh'), 4, iso_path=str(boot_file_path), rr_name='boot.bin')
+        iso.add_fp(BytesIO(b'duh'), 3, iso_path=str(boot_file_path), rr_name='boot.bin')
     else:
-        iso.add_fp(BytesIO(b'duh'), 4, iso_path=str(boot_file_path))
+        iso.add_fp(BytesIO(b'duh'), 3, iso_path=str(boot_file_path))
     iso.add_eltorito(str(boot_file_path))
 
     if isinstance(iso_facade, PyCdlibISO9660):
@@ -1186,6 +1187,50 @@ class TestExtractProgress:
         assert ExtractProgress(1, 0, 1, 1).seconds_left == 1
         assert ExtractProgress(1, 1, 1, 1).seconds_left == 0
         assert ExtractProgress(1, 1, 1, -1).seconds_left is None
+
+
+@pytest.mark.parametrize('rock_ridge', [False, True])
+@pytest.mark.parametrize('joliet', [False, True])
+@pytest.mark.parametrize('udf', [False, True])
+@pytest.mark.parametrize('remote', [False, True])
+def test_iso_size_contents(iso_typical, rock_ridge, joliet, udf, io_from_iso, remote):
+    """Test that ``iso_size_contents`` correctly calculates the size of ISO image
+    contents.
+    """
+    # prepare ISO
+    iso, directories, files = iso_typical(rock_ridge=rock_ridge, joliet=joliet, udf=udf)
+    iso_facade = _get_facade_for_iso(iso)
+    size_expected = sum(len(file[1]) for file in files)
+
+    # boot catalog should add 2048 bytes to the total size
+    iso.add_eltorito(files[0][0].upper() + ';1')
+    size_expected += 2048
+
+    # symlinks shouldn't add to the total size
+    if isinstance(iso_facade, PyCdlibRockRidge) or isinstance(iso_facade, PyCdlibUDF):
+
+        symlink_target_abs = PurePosixPath(files[1][0])
+        symlink_target_1 = symlink_target_abs.relative_to('/')
+        symlink_target_2 = symlink_target_abs.relative_to('/dir1')
+
+        # internal check, we want the symlink targets to actually exist on the image
+        assert str(symlink_target_abs).startswith('/dir1/')
+
+        symlinks = [
+            (PurePosixPath('/link1'), PurePath(symlink_target_1)),
+            (PurePosixPath('/dir1/link2'), PurePath(symlink_target_2)),
+            (PurePosixPath('/link3'), PurePath('path/does/not/exist')),
+        ]
+        for symlink_path, symlink_target in symlinks:
+            iso_facade.add_symlink(str(symlink_path), str(symlink_target))
+
+    # reopen iso
+    with io_from_iso(iso, remote) as file:
+        iso.close()
+        iso_reopened = PyCdlib()
+        iso_reopened.open_fp(file)
+        iso_facade_reopened = _get_facade_for_iso(iso_reopened)
+        assert iso_size_contents(iso_facade_reopened) == size_expected
 
 
 @pytest.mark.parametrize('rock_ridge', [False, True])
