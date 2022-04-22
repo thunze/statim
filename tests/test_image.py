@@ -533,6 +533,7 @@ class TestHttpIO:
         """
         # skipcq: PTC-W0062
         with http_io.chunked_transfer(1):
+            # skipcq: PTC-W0062
             with pytest.raises(
                 ValueError, match='Another chunked transfer is already active'
             ):
@@ -615,7 +616,6 @@ class TestHttpIO:
         """Test that the iterator provided by ``chunked_transfer`` stops if its
         context is left.
         """
-        # skipcq: PTC-W0062
         with http_io.chunked_transfer(1) as chunks:
             pass
         with pytest.raises(StopIteration):
@@ -661,7 +661,8 @@ class TestTps:
         filepath_iso = PurePosixPath('/thing')
         assert tps_default(filepath_iso, target_paths) is target_paths[0]
 
-    def test_tps_default_fail(self):
+    @staticmethod
+    def test_tps_default_fail():
         """Test that the default target path strategy raises ``ValueError`` if less
         than one target path is passed.
         """
@@ -728,13 +729,13 @@ def test__get_facade_for_iso(rock_ridge, joliet, udf):
     facade = _get_facade_for_iso(iso)
 
     if udf:
-        assert type(facade) == PyCdlibUDF
+        assert type(facade) is PyCdlibUDF
     elif joliet:
-        assert type(facade) == PyCdlibJoliet
+        assert type(facade) is PyCdlibJoliet
     elif rock_ridge:
-        assert type(facade) == PyCdlibRockRidge
+        assert type(facade) is PyCdlibRockRidge
     else:
-        assert type(facade) == PyCdlibISO9660
+        assert type(facade) is PyCdlibISO9660
 
 
 def test__pause_or_quit():
@@ -811,10 +812,8 @@ def io_from_iso(
         """
         buffer = BytesIO()
         iso.write_fp(buffer)
-
         buffer.seek(0)
         data = buffer.read()
-        del buffer
 
         if remote:
             return http_io_from_data(data)
@@ -1095,6 +1094,7 @@ def test__extract_file_el_torito(iso_new_args, io_from_iso, remote, tempdir):
     # add dummy directory
     dirpath = PurePosixPath('/DIR1')
     if isinstance(iso_facade, PyCdlibRockRidge):
+        # skipcq: PYL-E1123
         iso_facade.add_directory(str(dirpath), file_mode=RR_DEFAULT_FILE_MODE)
     else:
         iso_facade.add_directory(str(dirpath))
@@ -1148,7 +1148,8 @@ class TestExtractProgress:
     calculations.
     """
 
-    def test_done_ratio(self):
+    @staticmethod
+    def test_done_ratio():
         """Test that the ``done_ratio`` property handles zero values and other
         unexpected values properly.
         """
@@ -1159,7 +1160,8 @@ class TestExtractProgress:
         assert ExtractProgress(1, 1, 0, 0).done_ratio == 1
         assert ExtractProgress(8, 2, 0, 0).done_ratio == 0.25
 
-    def test_bytes_per_second(self):
+    @staticmethod
+    def test_bytes_per_second():
         """Test that the ``bytes_per_second`` property handles zero values and other
         unexpected values properly.
         """
@@ -1172,7 +1174,8 @@ class TestExtractProgress:
         assert ExtractProgress(0, 0, 2, -8).bytes_per_second == -4
         assert ExtractProgress(0, 0, float('inf'), 1).bytes_per_second == 0
 
-    def test_seconds_left(self):
+    @staticmethod
+    def test_seconds_left():
         """Test that the ``seconds_left`` property handles zero values and other
         unexpected values properly.
         """
@@ -1397,7 +1400,7 @@ def test_extract_fail_source(remote, tempdir):
         RuntimeError, match='Exception raised in worker thread'
     ) as exc_info:
         with extract(source, tempdir) as extraction:
-            for _ in extraction:
+            for _ in extraction:  # skipcq: PTC-W0047
                 pass
 
     # worker threads were aborted because an exception of type cause was raised
@@ -1411,7 +1414,7 @@ def test_extract_fail_disk_space(mocker, iso_typical, source_from_iso, remote, t
     This should lead to an exception being raised in the main thread before
     extracting anything.
     """
-    iso, directories, files = iso_typical()
+    iso, _, _ = iso_typical()
     source = source_from_iso(iso, remote)
     iso.close()
 
@@ -1419,11 +1422,12 @@ def test_extract_fail_disk_space(mocker, iso_typical, source_from_iso, remote, t
     # already imported by image module
     mocker.patch('statim.image.disk_usage', return_value=disk_usage_ret(1, 1, 0))
 
+    # skipcq: PTC-W0062
     with pytest.raises(
         ValueError, match='Not enough disk space available at target directories'
     ):
         with extract(source, tempdir) as extraction:
-            for _ in extraction:
+            for _ in extraction:  # skipcq: PTC-W0047
                 pass
 
     assert not list(tempdir.iterdir())  # nothing in tempdir
@@ -1443,8 +1447,6 @@ def test_extract_fail_worker(mocker, iso_typical, source_from_iso, remote, tempd
 
     class VerySpecificException(Exception):
         """Exception type used for mocking ``_extract_file``."""
-
-        pass
 
     # noinspection PyUnusedLocal
     def _extract_file_mock(job, source_file, iso_facade, progress, *args):
@@ -1466,7 +1468,7 @@ def test_extract_fail_worker(mocker, iso_typical, source_from_iso, remote, tempd
         RuntimeError, match='Exception raised in worker thread'
     ) as exc_info:
         with extract(source, tempdir) as extraction:
-            for _ in extraction:
+            for _ in extraction:  # skipcq: PTC-W0047
                 pass
 
     # worker threads were aborted because VerySpecificException was raised
