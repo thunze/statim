@@ -765,7 +765,7 @@ def tempdir():
 def tempfile():
     """Fixture providing a new temporary file for testing purposes.
 
-    The file is opened using the mode ``wb+`` to allow for reading and writing.
+    The file is opened using mode ``'wb+'`` to allow for reading and writing.
     """
     fd, path_str = mkstemp()
     os.close(fd)  # we use Path.open() instead
@@ -1258,6 +1258,11 @@ def test_extract_success(
     # get source for iso
     source = source_from_iso(iso, remote)
     iso.close()
+
+    # guarantee execution of main progress reporting code
+    import statim.image
+
+    mocker.patch.object(statim.image, 'PROGRESS_UPDATE_MIN_GAP', 0)
 
     def check_progress(progress: ExtractProgress):
         """Test meaningfulness of an ``ExtractProgress`` object in the context of the
