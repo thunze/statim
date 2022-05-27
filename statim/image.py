@@ -116,12 +116,12 @@ class HttpIO(IOBase, BinaryIO):
         return f'{self.__class__.__name__}(url={self._url!r})'
 
     def _check_closed(self) -> None:
-        """Raise a ``ValueError`` if the file is closed."""
+        """Raise ``ValueError`` if the file is closed."""
         if self.closed:  # skipcq: PYL-W0125
             raise ValueError('I/O operation on closed file')
 
     def _check_chunked_transfer(self) -> None:
-        """Raise a ``ValueError`` if a chunked transfer is currently active."""
+        """Raise ``ValueError`` if a chunked transfer is currently active."""
         if self._chunked_transfer is not None:
             raise ValueError('Random-access operation during chunked transfer')
 
