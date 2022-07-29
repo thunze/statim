@@ -469,8 +469,9 @@ def _extract_file(
     record = iso_facade.get_record(str(filepath_iso))
     if record.is_symlink():
         if isinstance(iso_facade, PyCdlibRockRidge):
-            symlink_target = record.rock_ridge.symlink_path().decode('utf-8')
-            filepath_local.symlink_to(symlink_target)
+            target_bytes = record.rock_ridge.symlink_path()  # type: ignore[union-attr]
+            target = target_bytes.decode('utf-8')
+            filepath_local.symlink_to(target)
         else:
             log.warning(f'Skipping non-Rock Ridge symlink at {filepath_iso}')
         return True
