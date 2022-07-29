@@ -103,7 +103,7 @@ class HttpIO(IOBase, BinaryIO):
 
         # https://datatracker.ietf.org/doc/html/rfc7230#section-3.3.2
         if 'content-length' not in headers:
-            raise OSError('Server does not provide a \'Content-Length\' header')
+            raise OSError("Server does not provide a 'Content-Length' header")
 
         self._length = int(headers['content-length'])
         self._pos = 0

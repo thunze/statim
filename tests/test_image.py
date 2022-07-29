@@ -219,7 +219,7 @@ class TestHttpIO:
         del headers['content-length']
         requests_mock.head(TEST_URL, status_code=200, headers=headers)
         with pytest.raises(
-            OSError, match='Server does not provide a \'Content-Length\' header'
+            OSError, match="Server does not provide a 'Content-Length' header"
         ):
             HttpIO(TEST_URL)
 
