@@ -10,7 +10,7 @@ from random import randbytes
 from shutil import rmtree
 from tempfile import mkdtemp, mkstemp
 from threading import Event
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Type
 
 import pytest
 from pycdlib import PyCdlib
@@ -989,12 +989,21 @@ def test__extract_file_symlink(iso_new_args, io_from_iso, remote, tempdir):
     iso.new(**iso_new_args)
     iso_facade = _get_facade_for_iso(iso)
 
+    add_fp: Callable[[BinaryIO, int, str], None]
+    add_directory: Callable[[str], None]
+
     # Rock Ridge facade takes extra arguments
-    add_fp = iso_facade.add_fp
-    add_directory = iso_facade.add_directory
     if isinstance(iso_facade, PyCdlibRockRidge):
-        add_fp = partial(add_fp, file_mode=RR_DEFAULT_FILE_MODE)
-        add_directory = partial(add_directory, file_mode=RR_DEFAULT_FILE_MODE)
+        # noinspection PyTypeChecker
+        add_fp = partial(iso_facade.add_fp, file_mode=RR_DEFAULT_FILE_MODE)
+        add_directory = partial(
+            iso_facade.add_directory, file_mode=RR_DEFAULT_FILE_MODE
+        )
+    elif isinstance(iso_facade, PyCdlibUDF):
+        add_fp = iso_facade.add_fp
+        add_directory = iso_facade.add_directory
+    else:
+        assert False
 
     # add files and directories
     add_directory('/dir1')
@@ -1433,6 +1442,8 @@ def test_extract_fail_source(remote, tempdir):
     This should lead to an exception being raised in the worker threads which then
     gets passed on to the main thread via the exception queue.
     """
+    source: LocalSource | RemoteSource
+    cause: Type[FileNotFoundError] | Type[RequestsConnectionError]
     if remote:
         source = RemoteSource.parse_obj(
             {'type': 'remote', 'url': 'http://example.invalid'}
@@ -1467,7 +1478,7 @@ def test_extract_fail_disk_space(mocker, iso_typical, source_from_iso, remote, t
     source = source_from_iso(iso, remote)
     iso.close()
 
-    disk_usage_ret = namedtuple('usage', ['total', 'used', 'free'])
+    disk_usage_ret = namedtuple('disk_usage_ret', ['total', 'used', 'free'])
     # already imported by image module
     mocker.patch('statim.image.disk_usage', return_value=disk_usage_ret(1, 1, 0))
 

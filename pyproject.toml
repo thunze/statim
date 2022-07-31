@@ -68,6 +68,7 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+check_untyped_defs = true
 
 [tool.pydantic-mypy]
 init_forbid_extra = true
