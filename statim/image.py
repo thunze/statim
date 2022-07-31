@@ -420,8 +420,8 @@ def _get_facade_for_iso(iso: PyCdlib) -> PyCdlibFacade:
     extension supported by ``iso``.
     """
     if iso.has_udf():
-        # prioritize UDF if it's available because it's required for modern
-        # Windows ISOs (>= Vista)
+        # Prioritize UDF if it's available because it's required for modern
+        # Windows ISOs (>= Vista).
         return iso.get_udf_facade()
     if iso.has_joliet():
         return iso.get_joliet_facade()

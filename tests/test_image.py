@@ -1012,8 +1012,8 @@ def test__extract_file_symlink(iso_new_args, io_from_iso, remote, tempdir):
     file_path = PurePosixPath('/dir1/file1.bin')
     add_fp(BytesIO(data), len(data), str(file_path))
 
-    # use PurePath for symlink targets because on Windows, symlink targets must use
-    # backward slashes instead of forward slashes to work with actually existing files
+    # Use PurePath for symlink targets because on Windows, symlink targets must use
+    # backward slashes instead of forward slashes to work with actually existing files.
     symlinks = [
         (PurePosixPath('/link1'), PurePath(file_path.relative_to('/'))),
         (PurePosixPath('/dir1/link2'), PurePath(file_path.relative_to('/dir1'))),
