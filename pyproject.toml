@@ -1,43 +1,43 @@
 [tool.poetry]
-name = 'statim'
-version = '0.1.0'
-description = ''
-license = 'LGPL-2.1-only'
-authors = ['Tom Hunze <github@thunze.de>']
-readme = 'README.md'
+name = "statim"
+version = "0.1.0"
+description = ""
+license = "LGPL-2.1-only"
+authors = ["Tom Hunze <github@thunze.de>"]
+readme = "README.md"
 
 [tool.poetry.dependencies]
-python = '^3.10'
-pycdlib = '^1.13.0'
-pydantic = '^1.9.0'
-requests = '^2.27.1'
+python = "^3.10"
+pycdlib = "^1.13.0"
+pydantic = "^1.9.0"
+requests = "^2.27.1"
 
 [tool.poetry.dev-dependencies]
-pytest = '^7.0.1'
-pytest-mock = '^3.7.0'
-requests-mock = {extras = ['pytest'], version = '^1.9.3'}
-types-requests = '^2.27.1'
-coveralls = '^3.3.1'
-pytest-cov = '^3.0.0'
-pre-commit = '^2.17.0'
-isort = '^5.10.1'
-black = '^22.3.0'
-flake8 = '^4.0.1'
-mypy = '^0.971'
+pytest = "^7.0.1"
+pytest-mock = "^3.7.0"
+requests-mock = {extras = ["pytest"], version = "^1.9.3"}
+types-requests = "^2.27.1"
+coveralls = "^3.3.1"
+pytest-cov = "^3.0.0"
+pre-commit = "^2.17.0"
+isort = "^5.10.1"
+black = "^22.3.0"
+flake8 = "^4.0.1"
+mypy = "^0.971"
 
 [tool.coverage.report]
 exclude_lines = [
-    'pragma: no cover',
-    'if TYPE_CHECKING:',
-    'if __name__ == .__main__.:',
-    'raise NotImplementedError',
-    'return NotImplemented',
-    'assert False',
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "return NotImplemented",
+    "assert False",
 ]
 
 [tool.black]
-target-version = ['py310']
-skip-string-normalization = true  # maybe disable this later on
+target-version = ["py310"]
+skip-string-normalization = true
 include = '\.pyi?$'
 exclude = '''
 /(
@@ -53,10 +53,10 @@ exclude = '''
 '''
 
 [tool.isort]
-profile = 'black'
+profile = "black"
 
 [tool.mypy]
-plugins = ['pydantic.mypy']
+plugins = ["pydantic.mypy"]
 disallow_any_generics = true
 disallow_untyped_defs = true
 strict_equality = true
@@ -66,7 +66,7 @@ warn_return_any = true
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = 'tests.*'
+module = "tests.*"
 disallow_untyped_defs = false
 
 [tool.pydantic-mypy]
@@ -75,5 +75,5 @@ warn_required_dynamic_aliases = true
 warn_untyped_fields = true
 
 [build-system]
-requires = ['poetry-core>=1.0.0']
-build-backend = 'poetry.core.masonry.api'
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
